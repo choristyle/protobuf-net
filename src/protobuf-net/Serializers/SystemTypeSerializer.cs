@@ -2,51 +2,35 @@
 
 #if !NO_RUNTIME
 
-#if FEAT_IKVM
-using Type = IKVM.Reflection.Type;
-using IKVM.Reflection;
-#else
-using System.Reflection;
-#endif
-
 namespace ProtoBuf.Serializers
 {
-    sealed class SystemTypeSerializer : IProtoSerializer
+    internal sealed class SystemTypeSerializer : IProtoSerializer
     {
-#if FEAT_IKVM
-        readonly Type expectedType;
-#else
-        static readonly Type expectedType = typeof(System.Type);
-#endif
-        public SystemTypeSerializer(ProtoBuf.Meta.TypeModel model)
-        {
-#if FEAT_IKVM
-            expectedType = model.MapType(typeof(System.Type));
-#endif
-        }
-        public Type ExpectedType { get { return expectedType; } }
+        private static readonly Type expectedType = typeof(Type);
 
-#if !FEAT_IKVM
-        void IProtoSerializer.Write(object value, ProtoWriter dest)
+        public Type ExpectedType => expectedType;
+
+        void IProtoSerializer.Write(ProtoWriter dest, ref ProtoWriter.State state, object value)
         {
-            ProtoWriter.WriteType((Type)value, dest);
+            ProtoWriter.WriteType((Type)value, dest, ref state);
         }
 
-        object IProtoSerializer.Read(object value, ProtoReader source)
+        object IProtoSerializer.Read(ProtoReader source, ref ProtoReader.State state, object value)
         {
             Helpers.DebugAssert(value == null); // since replaces
-            return source.ReadType();
+            return source.ReadType(ref state);
         }
-#endif
-        bool IProtoSerializer.RequiresOldValue { get { return false; } }
-        bool IProtoSerializer.ReturnsValue { get { return true; } }
+
+        bool IProtoSerializer.RequiresOldValue => false;
+
+        bool IProtoSerializer.ReturnsValue => true;
 
 #if FEAT_COMPILER
         void IProtoSerializer.EmitWrite(Compiler.CompilerContext ctx, Compiler.Local valueFrom)
         {
             ctx.EmitBasicWrite("WriteType", valueFrom);
         }
-        void IProtoSerializer.EmitRead(Compiler.CompilerContext ctx, Compiler.Local valueFrom)
+        void IProtoSerializer.EmitRead(Compiler.CompilerContext ctx, Compiler.Local entity)
         {
             ctx.EmitBasicRead("ReadType", ExpectedType);
         }

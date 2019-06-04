@@ -1,50 +1,35 @@
 ﻿#if !NO_RUNTIME
 using System;
 
-#if FEAT_IKVM
-using Type = IKVM.Reflection.Type;
-using IKVM.Reflection;
-#else
-using System.Reflection;
-#endif
-
 namespace ProtoBuf.Serializers
 {
-    sealed class SByteSerializer : IProtoSerializer
+    internal sealed class SByteSerializer : IProtoSerializer
     {
-#if FEAT_IKVM
-        readonly Type expectedType;
-#else
-        static readonly Type expectedType = typeof(sbyte);
-#endif
-        public SByteSerializer(ProtoBuf.Meta.TypeModel model)
-        {
-#if FEAT_IKVM
-            expectedType = model.MapType(typeof(sbyte));
-#endif
-        }
-        public Type ExpectedType { get { return expectedType; } }
+        private static readonly Type expectedType = typeof(sbyte);
 
+        public Type ExpectedType => expectedType;
 
-        bool IProtoSerializer.RequiresOldValue { get { return false; } }
-        bool IProtoSerializer.ReturnsValue { get { return true; } }
-#if !FEAT_IKVM
-        public object Read(object value, ProtoReader source)
+        bool IProtoSerializer.RequiresOldValue => false;
+
+        bool IProtoSerializer.ReturnsValue => true;
+
+        public object Read(ProtoReader source, ref ProtoReader.State state, object value)
         {
             Helpers.DebugAssert(value == null); // since replaces
-            return source.ReadSByte();
+            return source.ReadSByte(ref state);
         }
-        public void Write(object value, ProtoWriter dest)
+
+        public void Write(ProtoWriter dest, ref ProtoWriter.State state, object value)
         {
-            ProtoWriter.WriteSByte((sbyte)value, dest);
+            ProtoWriter.WriteSByte((sbyte)value, dest, ref state);
         }
-#endif
+
 #if FEAT_COMPILER
         void IProtoSerializer.EmitWrite(Compiler.CompilerContext ctx, Compiler.Local valueFrom)
         {
             ctx.EmitBasicWrite("WriteSByte", valueFrom);
         }
-        void IProtoSerializer.EmitRead(Compiler.CompilerContext ctx, Compiler.Local valueFrom)
+        void IProtoSerializer.EmitRead(Compiler.CompilerContext ctx, Compiler.Local entity)
         {
             ctx.EmitBasicRead("ReadSByte", ExpectedType);
         }

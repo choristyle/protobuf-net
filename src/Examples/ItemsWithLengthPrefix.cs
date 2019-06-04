@@ -27,10 +27,6 @@ namespace Examples
             int count = 0;
             foreach(int value in values)
             {
-                if (source.Length == source.Position)
-                {
-                    Debugger.Break();
-                }
                 Foo foo = Serializer.DeserializeWithLengthPrefix<Foo>(source, style, tag);
                 Assert.Equal(value, foo.Value);
                 count++;
@@ -198,12 +194,12 @@ namespace Examples
         [Fact]
         public void TestEmptyStreams()
         {
-            TestEmptyStreams<int>();
-            TestEmptyStreams<IMLChild>();
-            TestEmptyStreams<IMLParent>();
+            TestEmptyStreamsImpl<int>();
+            TestEmptyStreamsImpl<IMLChild>();
+            TestEmptyStreamsImpl<IMLParent>();
         }
 
-        static void TestEmptyStreams<T>()
+        static void TestEmptyStreamsImpl<T>()
         {
             Assert.False(Serializer.DeserializeItems<T>(Stream.Null, PrefixStyle.Fixed32, 0).Any());
             Assert.False(Serializer.DeserializeItems<T>(Stream.Null, PrefixStyle.Base128, 0).Any());

@@ -1,50 +1,36 @@
 ﻿#if !NO_RUNTIME
 using System;
-using ProtoBuf.Meta;
-
-#if FEAT_IKVM
-using Type = IKVM.Reflection.Type;
-using IKVM.Reflection;
-#else
-using System.Reflection;
-#endif
 
 namespace ProtoBuf.Serializers
 {
-    sealed class DoubleSerializer : IProtoSerializer
+    internal sealed class DoubleSerializer : IProtoSerializer
     {
-#if FEAT_IKVM
-        readonly Type expectedType;
-#else
-        static readonly Type expectedType = typeof(double);
-#endif
-        public DoubleSerializer(ProtoBuf.Meta.TypeModel model)
-        {
-#if FEAT_IKVM
-            expectedType = model.MapType(typeof(double));
-#endif
-        }
+        private static readonly Type expectedType = typeof(double);
 
-        public Type ExpectedType { get { return expectedType; } }
-        bool IProtoSerializer.RequiresOldValue { get { return false; } }
-        bool IProtoSerializer.ReturnsValue { get { return true; } }
-#if !FEAT_IKVM
-        public object Read(object value, ProtoReader source)
+        public Type ExpectedType => expectedType;
+
+        bool IProtoSerializer.RequiresOldValue => false;
+
+        bool IProtoSerializer.ReturnsValue => true;
+
+        public object Read(ProtoReader source, ref ProtoReader.State state, object value)
         {
             Helpers.DebugAssert(value == null); // since replaces
-            return source.ReadDouble();
+            return source.ReadDouble(ref state);
         }
-        public void Write(object value, ProtoWriter dest)
+
+        public void Write(ProtoWriter dest, ref ProtoWriter.State state, object value)
         {
-            ProtoWriter.WriteDouble((double)value, dest);
+            ProtoWriter.WriteDouble((double)value, dest, ref state);
         }
-#endif
+
 #if FEAT_COMPILER
         void IProtoSerializer.EmitWrite(Compiler.CompilerContext ctx, Compiler.Local valueFrom)
         {
             ctx.EmitBasicWrite("WriteDouble", valueFrom);
         }
-        void IProtoSerializer.EmitRead(Compiler.CompilerContext ctx, Compiler.Local valueFrom)
+
+        void IProtoSerializer.EmitRead(Compiler.CompilerContext ctx, Compiler.Local entity)
         {
             ctx.EmitBasicRead("ReadDouble", ExpectedType);
         }

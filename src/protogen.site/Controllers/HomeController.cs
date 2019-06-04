@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using ProtoBuf;
+using ProtoBuf.Meta;
 using ProtoBuf.Reflection;
 using System;
 using System.Collections.Generic;
@@ -10,26 +11,31 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 
 namespace protogen.site.Controllers
 {
-
 #if RELEASE
     [RequireHttps]
 #endif
     public class HomeController : Controller
     {
-        readonly IHostingEnvironment _host;
+        private readonly IHostingEnvironment _host;
         public HomeController(IHostingEnvironment host)
         {
             _host = host;
         }
-        public IActionResult Index()
+        public IActionResult Index(string oneof = null, string langver = null, string names = null)
         {
-            var model = new IndexModel();
-            model.ProtocVersion = GetProtocVersion(_host, out var canUse);
-            model.CanUseProtoc = canUse;
+            var model = new IndexModel
+            {
+                ProtocVersion = GetProtocVersion(_host, out var canUse),
+                CanUseProtoc = canUse,
+                OneOfEnum = string.Equals(oneof, "enum", StringComparison.OrdinalIgnoreCase),
+                LangVer = langver ?? "",
+                Names = names ?? "",
+            };
             return View("Index", model);
         }
 
@@ -59,11 +65,30 @@ namespace protogen.site.Controllers
             }
         }
 
-
         public class IndexModel
         {
             public string ProtocVersion { get; set; }
             public bool CanUseProtoc { get; set; }
+            public bool OneOfEnum { get; set; }
+            public string LangVer { get; set; }
+            public string Names { get; set; }
+
+            public string LibVersion => _libVersion;
+
+            private static readonly string _libVersion;
+
+            static IndexModel()
+            {
+                var tmVer = GetVersion(typeof(TypeModel));
+                var cgVer = GetVersion(typeof(CodeGenerator));
+                _libVersion = tmVer == cgVer ? tmVer : (tmVer + "/" + cgVer);
+            }
+            private static string GetVersion(Type type)
+            {
+                var assembly = type.GetTypeInfo().Assembly;
+                return assembly.GetCustomAttribute<AssemblyFileVersionAttribute>()?.Version
+                    ?? assembly.GetName().Version.ToString();
+            }
         }
         public const int MaxFileLength = 1024 * 1024;
         [Route("/decode")]
@@ -72,7 +97,6 @@ namespace protogen.site.Controllers
             byte[] data = null;
             try
             {
-                
                 if (hex != null) hex = hex.Trim();
                 if (base64 != null) base64 = base64.Trim();
 
@@ -83,7 +107,7 @@ namespace protogen.site.Controllers
                     {
                         stream.CopyTo(ms);
                         data = ms.ToArray();
-                    }                        
+                    }
                 }
                 else if (!string.IsNullOrWhiteSpace(hex))
                 {
@@ -115,12 +139,12 @@ namespace protogen.site.Controllers
             private DecodeModel(byte[] data, bool deep, int offset, int count, int skipField = 0)
             {
                 this.data = data == null
-                    ? default(ArraySegment<byte>)
+                    ? default
                     : new ArraySegment<byte>(data, offset, count);
                 Deep = deep;
                 SkipField = skipField;
             }
-            public DecodeModel(byte[] data, bool deep) : this(data, deep, 0, data?.Length??0) { }
+            public DecodeModel(byte[] data, bool deep) : this(data, deep, 0, data?.Length ?? 0) { }
 
             public string AsHex() => ContainsValue ? BitConverter.ToString(data.Array, data.Offset, data.Count) : null;
 
@@ -135,10 +159,10 @@ namespace protogen.site.Controllers
                 catch { return null; }
             }
             public int Count => data.Count;
-            public ProtoReader GetReader()
+            public ProtoReader GetReader(out ProtoReader.State state)
             {
                 var ms = new MemoryStream(data.Array, data.Offset, data.Count, false);
-                return new ProtoReader(ms, null, null);
+                return ProtoReader.Create(out state, ms, null, null);
             }
             public bool ContainsValue => data.Array != null;
             public bool CouldBeProto()
@@ -146,14 +170,14 @@ namespace protogen.site.Controllers
                 if (!ContainsValue) return false;
                 try
                 {
-                    using (var reader = GetReader())
+                    using (var reader = GetReader(out var state))
                     {
                         int field;
-                        while ((field = reader.ReadFieldHeader()) > 0)
+                        while ((field = reader.ReadFieldHeader(ref state)) > 0)
                         {
-                            reader.SkipField();
+                            reader.SkipField(ref state);
                         }
-                        return reader.Position == Count; // MemoryStream will let you seek out of bounds!
+                        return reader.GetPosition(ref state) == Count; // MemoryStream will let you seek out of bounds!
                     }
                 }
                 catch
@@ -166,11 +190,42 @@ namespace protogen.site.Controllers
 
         [Route("/generate")]
         [HttpPost]
-        public GenerateResult Generate(string schema = null, string tooling = null)
+        public GenerateResult Generate(string schema = null, string tooling = null, string names = null)
         {
             if (string.IsNullOrWhiteSpace(schema))
             {
                 return null;
+            }
+
+            Dictionary<string, string> options = null;
+            foreach(var field in Request.Form)
+            {
+                switch(field.Key)
+                {
+                    case nameof(schema):
+                    case nameof(tooling):
+                    case nameof(names):
+                        break; // handled separately
+                    default:
+                        string s = field.Value;
+                        if (!string.IsNullOrWhiteSpace(s))
+                        {
+                            if (options == null) options = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                            options[field.Key] = s;
+                        }
+                        break;
+                }
+            }
+
+            NameNormalizer nameNormalizer = null;
+            switch (names)
+            {
+                case "auto":
+                    nameNormalizer = NameNormalizer.Default;
+                    break;
+                case "original":
+                    nameNormalizer = NameNormalizer.Null;
+                    break;
             }
             var result = new GenerateResult();
             try
@@ -193,7 +248,20 @@ namespace protogen.site.Controllers
                         {
                             result.ParserExceptions = errors;
                         }
-                        result.Files = CSharpCodeGenerator.Default.Generate(set).ToArray();
+                        CodeGenerator codegen;
+                        switch (tooling)
+                        {
+                            case "protogen:VB":
+#pragma warning disable 0618
+                                codegen = VBCodeGenerator.Default;
+#pragma warning restore 0618
+                                break;
+                            case "protogen:C#":
+                            default:
+                                codegen = CSharpCodeGenerator.Default;
+                                break;
+                        }
+                        result.Files = codegen.Generate(set, nameNormalizer, options).ToArray();
                     }
                     else
                     {
@@ -220,8 +288,8 @@ namespace protogen.site.Controllers
             return result;
         }
 
-        Dictionary<string, string> legalImports = null;
-        readonly static char[] DirSeparators = { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar };
+        private Dictionary<string, string> legalImports = null;
+        private readonly static char[] DirSeparators = { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar };
 
         private bool ValidateImport(string path) => ResolveImport(path) != null;
         private string ResolveImport(string path)
@@ -247,13 +315,12 @@ namespace protogen.site.Controllers
                 out string actual) ? actual : null;
         }
 
-        static string protocVersion = null;
-        static bool protocUsable;
+        private static string protocVersion = null;
+        private static bool protocUsable;
         public static string GetProtocVersion(IHostingEnvironment host, out bool canUse)
         {
             if (protocVersion == null)
             {
-
                 try
                 {
                     int code = RunProtoc(host, "--version", Path.GetTempPath(), out var stdout, out var stderr);
@@ -275,7 +342,7 @@ namespace protogen.site.Controllers
             canUse = protocUsable;
             return protocVersion;
         }
-        static int RunProtoc(IHostingEnvironment host, string arguments, string workingDir, out string stdout, out string stderr)
+        private static int RunProtoc(IHostingEnvironment host, string arguments, string workingDir, out string stdout, out string stderr)
         {
             var exePath = Path.Combine(host.WebRootPath, "protoc\\protoc.exe");
             if (!System.IO.File.Exists(exePath))
@@ -288,6 +355,7 @@ namespace protogen.site.Controllers
                 psi.FileName = exePath;
                 psi.Arguments = arguments;
                 if (!string.IsNullOrEmpty(workingDir)) psi.WorkingDirectory = workingDir;
+                psi.CreateNoWindow = true;
                 psi.RedirectStandardError = psi.RedirectStandardOutput = true;
                 psi.UseShellExecute = false;
                 proc.Start();

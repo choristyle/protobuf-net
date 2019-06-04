@@ -2,7 +2,7 @@
 
 namespace ProtoBuf.Reflection
 {
-    partial class CommonCodeGenerator
+    public partial class CommonCodeGenerator
     {
         /// <summary>
         /// Represents the union summary of a one-of declaration
@@ -14,9 +14,15 @@ namespace ProtoBuf.Reflection
             /// </summary>
             public OneofDescriptorProto OneOf { get; }
 
-            internal OneOfStub(OneofDescriptorProto decl)
+            /// <summary>
+            /// The effective index of this stub
+            /// </summary>
+            public int Index { get; }
+
+            internal OneOfStub(OneofDescriptorProto decl, int index)
             {
                 OneOf = decl;
+                Index = index;
             }
             internal int Count32 { get; private set; }
             internal int Count64 { get; private set; }
@@ -76,20 +82,20 @@ namespace ProtoBuf.Reflection
                     case FieldDescriptorProto.Type.TypeInt32:
                     case FieldDescriptorProto.Type.TypeSfixed32:
                     case FieldDescriptorProto.Type.TypeSint32:
-                    case FieldDescriptorProto.Type.TypeFixed32:
                     case FieldDescriptorProto.Type.TypeEnum:
                         return "Int32";
                     case FieldDescriptorProto.Type.TypeFloat:
                         return "Single";
+                    case FieldDescriptorProto.Type.TypeFixed32:
                     case FieldDescriptorProto.Type.TypeUint32:
                         return "UInt32";
                     case FieldDescriptorProto.Type.TypeDouble:
                         return "Double";
-                    case FieldDescriptorProto.Type.TypeFixed64:
                     case FieldDescriptorProto.Type.TypeInt64:
                     case FieldDescriptorProto.Type.TypeSfixed64:
                     case FieldDescriptorProto.Type.TypeSint64:
                         return "Int64";
+                    case FieldDescriptorProto.Type.TypeFixed64:
                     case FieldDescriptorProto.Type.TypeUint64:
                         return "UInt64";
                     case FieldDescriptorProto.Type.TypeMessage:
@@ -108,14 +114,15 @@ namespace ProtoBuf.Reflection
                         return "Object";
                 }
             }
-            internal static OneOfStub[] Build(GeneratorContext context, DescriptorProto message)
+            internal static OneOfStub[] Build(DescriptorProto message)
             {
                 if (message.OneofDecls.Count == 0) return null;
                 var stubs = new OneOfStub[message.OneofDecls.Count];
                 int index = 0;
                 foreach (var decl in message.OneofDecls)
                 {
-                    stubs[index++] = new OneOfStub(decl);
+                    stubs[index] = new OneOfStub(decl, index);
+                    index++;
                 }
                 foreach (var field in message.Fields)
                 {

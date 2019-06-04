@@ -1,42 +1,25 @@
 ﻿#if !NO_RUNTIME
 using System;
 
-#if FEAT_IKVM
-using Type = IKVM.Reflection.Type;
-using IKVM.Reflection;
-#else
-using System.Reflection;
-#endif
-
-
 namespace ProtoBuf.Serializers
 {
-    sealed class CharSerializer : UInt16Serializer
+    internal sealed class CharSerializer : UInt16Serializer
     {
-#if FEAT_IKVM
-        readonly Type expectedType;
-#else
-        static readonly Type expectedType = typeof(char);
-#endif
-        public CharSerializer(ProtoBuf.Meta.TypeModel model) : base(model)
-        {
-#if FEAT_IKVM
-            expectedType = model.MapType(typeof(char));
-#endif
-        }
-        public override Type ExpectedType { get { return expectedType; } }
+        private static readonly Type expectedType = typeof(char);
 
-#if !FEAT_IKVM
-        public override void Write(object value, ProtoWriter dest)
+        public override Type ExpectedType => expectedType;
+
+        public override void Write(ProtoWriter dest, ref ProtoWriter.State state, object value)
         {
-            ProtoWriter.WriteUInt16((ushort)(char)value, dest);
+            ProtoWriter.WriteUInt16((ushort)(char)value, dest, ref state);
         }
-        public override object Read(object value, ProtoReader source)
+
+        public override object Read(ProtoReader source, ref ProtoReader.State state, object value)
         {
             Helpers.DebugAssert(value == null); // since replaces
-            return (char)source.ReadUInt16();
+            return (char)source.ReadUInt16(ref state);
         }
-#endif
+
         // no need for any special IL here; ushort and char are
         // interchangeable as long as there is no boxing/unboxing
     }

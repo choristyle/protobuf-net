@@ -1,53 +1,35 @@
 ﻿#if !NO_RUNTIME
 using System;
 
-#if FEAT_IKVM
-using Type = IKVM.Reflection.Type;
-using IKVM.Reflection;
-#else
-using System.Reflection;
-#endif
-
-
-
-
-
 namespace ProtoBuf.Serializers
 {
-    sealed class BooleanSerializer : IProtoSerializer
+    internal sealed class BooleanSerializer : IProtoSerializer
     {
-#if FEAT_IKVM
-        readonly Type expectedType;
-#else
-        static readonly Type expectedType = typeof(bool);
-#endif
-        public BooleanSerializer(ProtoBuf.Meta.TypeModel model)
-        {
-#if FEAT_IKVM
-            expectedType = model.MapType(typeof(bool));
-#endif
-        }
-        public Type ExpectedType { get { return expectedType; } }
+        private static readonly Type expectedType = typeof(bool);
 
-#if !FEAT_IKVM
-        public void Write(object value, ProtoWriter dest)
+        public Type ExpectedType => expectedType;
+
+        public void Write(ProtoWriter dest, ref ProtoWriter.State state, object value)
         {
-            ProtoWriter.WriteBoolean((bool)value, dest);
+            ProtoWriter.WriteBoolean((bool)value, dest, ref state);
         }
-        public object Read(object value, ProtoReader source)
+
+        public object Read(ProtoReader source, ref ProtoReader.State state, object value)
         {
             Helpers.DebugAssert(value == null); // since replaces
-            return source.ReadBoolean();
+            return source.ReadBoolean(ref state);
         }
-#endif
-        bool IProtoSerializer.RequiresOldValue { get { return false; } }
-        bool IProtoSerializer.ReturnsValue { get { return true; } }
+
+        bool IProtoSerializer.RequiresOldValue => false;
+
+        bool IProtoSerializer.ReturnsValue => true;
+
 #if FEAT_COMPILER
         void IProtoSerializer.EmitWrite(Compiler.CompilerContext ctx, Compiler.Local valueFrom)
         {
             ctx.EmitBasicWrite("WriteBoolean", valueFrom);
         }
-        void IProtoSerializer.EmitRead(Compiler.CompilerContext ctx, Compiler.Local valueFrom)
+        void IProtoSerializer.EmitRead(Compiler.CompilerContext ctx, Compiler.Local entity)
         {
             ctx.EmitBasicRead("ReadBoolean", ExpectedType);
         }

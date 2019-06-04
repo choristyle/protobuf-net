@@ -1,54 +1,40 @@
 ﻿#if !NO_RUNTIME
 using System;
 
-#if FEAT_IKVM
-using Type = IKVM.Reflection.Type;
-#endif
-
-
-
 namespace ProtoBuf.Serializers
 {
-    sealed class ByteSerializer : IProtoSerializer
+    internal sealed class ByteSerializer : IProtoSerializer
     {
         public Type ExpectedType { get { return expectedType; } }
 
-#if FEAT_IKVM
-        readonly Type expectedType;
-#else
-        static readonly Type expectedType = typeof(byte);
-#endif
-        public ByteSerializer(ProtoBuf.Meta.TypeModel model)
+        private static readonly Type expectedType = typeof(byte);
+
+        bool IProtoSerializer.RequiresOldValue => false;
+
+        bool IProtoSerializer.ReturnsValue => true;
+
+        public void Write(ProtoWriter dest, ref ProtoWriter.State state, object value)
         {
-#if FEAT_IKVM
-            expectedType = model.MapType(typeof(byte));
-#endif
+            ProtoWriter.WriteByte((byte)value, dest, ref state);
         }
-        bool IProtoSerializer.RequiresOldValue { get { return false; } }
-        bool IProtoSerializer.ReturnsValue { get { return true; } }
-#if !FEAT_IKVM
-        public void Write(object value, ProtoWriter dest)
-        {
-            ProtoWriter.WriteByte((byte)value, dest);
-        }
-        public object Read(object value, ProtoReader source)
+
+        public object Read(ProtoReader source, ref ProtoReader.State state, object value)
         {
             Helpers.DebugAssert(value == null); // since replaces
-            return source.ReadByte();
+            return source.ReadByte(ref state);
         }
-#endif
 
 #if FEAT_COMPILER
         void IProtoSerializer.EmitWrite(Compiler.CompilerContext ctx, Compiler.Local valueFrom)
         {
             ctx.EmitBasicWrite("WriteByte", valueFrom);
         }
-        void IProtoSerializer.EmitRead(Compiler.CompilerContext ctx, Compiler.Local valueFrom)
+
+        void IProtoSerializer.EmitRead(Compiler.CompilerContext ctx, Compiler.Local entity)
         {
             ctx.EmitBasicRead("ReadByte", ExpectedType);
         }
 #endif
-
     }
 }
 #endif

@@ -2,22 +2,16 @@
 using System;
 using System.Collections;
 using System.Text;
-
-#if FEAT_IKVM
-using Type = IKVM.Reflection.Type;
-using IKVM.Reflection;
-using IKVM.Reflection.Emit;
-#else
 using System.Reflection;
 #if FEAT_COMPILER
 using System.Reflection.Emit;
-#endif
 #endif
 
 using ProtoBuf.Serializers;
 using System.Threading;
 using System.IO;
-
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
 
 namespace ProtoBuf.Meta
 {
@@ -32,23 +26,26 @@ namespace ProtoBuf.Meta
            OPTIONS_IsDefaultModel = 2,
            OPTIONS_Frozen = 4,
            OPTIONS_AutoAddMissingTypes = 8,
-#if FEAT_COMPILER && !FX11
+#if FEAT_COMPILER
            OPTIONS_AutoCompile = 16,
 #endif
            OPTIONS_UseImplicitZeroDefaults = 32,
            OPTIONS_AllowParseableTypes = 64,
            OPTIONS_AutoAddProtoContractTypesOnly = 128,
            OPTIONS_IncludeDateTimeKind = 256,
-           OPTIONS_DoNotInternStrings = 512;
+           OPTIONS_InternStrings = 512;
+
         private bool GetOption(ushort option)
         {
             return (options & option) == option;
         }
+
         private void SetOption(ushort option, bool value)
         {
             if (value) options |= option;
             else options &= (ushort)~option;
         }
+
         /// <summary>
         /// Global default that
         /// enables/disables automatic tag generation based on the existing name / order
@@ -75,18 +72,22 @@ namespace ProtoBuf.Meta
         }
 
         /// <summary>
+        /// <para>
         /// Global switch that enables or disables the implicit
         /// handling of "zero defaults"; meanning: if no other default is specified,
         /// it assumes bools always default to false, integers to zero, etc.
-        /// 
+        /// </para>
+        /// <para>
         /// If this is disabled, no such assumptions are made and only *explicit*
         /// default values are processed. This is enabled by default to 
         /// preserve similar logic to v1.
+        /// </para>
         /// </summary>
         public bool UseImplicitZeroDefaults
         {
-            get {return GetOption(OPTIONS_UseImplicitZeroDefaults);}
-            set {
+            get { return GetOption(OPTIONS_UseImplicitZeroDefaults); }
+            set
+            {
                 if (!value && GetOption(OPTIONS_IsDefaultModel))
                 {
                     throw new InvalidOperationException("UseImplicitZeroDefaults cannot be disabled on the default model");
@@ -104,6 +105,7 @@ namespace ProtoBuf.Meta
             get { return GetOption(OPTIONS_AllowParseableTypes); }
             set { SetOption(OPTIONS_AllowParseableTypes, value); }
         }
+
         /// <summary>
         /// Global switch that determines whether DateTime serialization should include the <c>Kind</c> of the date/time.
         /// </summary>
@@ -112,15 +114,22 @@ namespace ProtoBuf.Meta
             get { return GetOption(OPTIONS_IncludeDateTimeKind); }
             set { SetOption(OPTIONS_IncludeDateTimeKind, value); }
         }
+
         /// <summary>
         /// Global switch that determines whether a single instance of the same string should be used during deserialization.
         /// </summary>
         /// <remarks>Note this does not use the global .NET string interner</remarks>
-        public bool InternStrings
+        public new bool InternStrings
         {
-            get { return !GetOption(OPTIONS_DoNotInternStrings); }
-            set { SetOption(OPTIONS_DoNotInternStrings, !value); }
+            get { return GetOption(OPTIONS_InternStrings); }
+            set { SetOption(OPTIONS_InternStrings, value); }
         }
+
+        /// <summary>
+        /// Global switch that determines whether a single instance of the same string should be used during deserialization.
+        /// </summary>
+        protected internal override bool GetInternStrings() => InternStrings;
+
         /// <summary>
         /// Should the <c>Kind</c> be included on date/time values?
         /// </summary>
@@ -128,25 +137,23 @@ namespace ProtoBuf.Meta
         {
             return GetOption(OPTIONS_IncludeDateTimeKind);
         }
-        
 
         private sealed class Singleton
         {
             private Singleton() { }
             internal static readonly RuntimeTypeModel Value = new RuntimeTypeModel(true);
         }
+
         /// <summary>
         /// The default model, used to support ProtoBuf.Serializer
         /// </summary>
-        public static RuntimeTypeModel Default
-        {
-            get { return Singleton.Value; }
-        }
+        public static RuntimeTypeModel Default => Singleton.Value;
+
         /// <summary>
         /// Returns a sequence of the Type instances that can be
         /// processed by this model.
         /// </summary>
-        public IEnumerable GetTypes() { return types; }
+        public IEnumerable GetTypes() => types;
 
         /// <summary>
         /// Suggest a .proto definition for the given type
@@ -161,7 +168,7 @@ namespace ProtoBuf.Meta
             bool isInbuiltType = false;
             if (type == null)
             { // generate for the entire model
-                foreach(MetaType meta in types)
+                foreach (MetaType meta in types)
                 {
                     MetaType tmp = meta.GetSurrogateOrBaseOrSelf(false);
                     if (!requiredTypes.Contains(tmp))
@@ -176,13 +183,12 @@ namespace ProtoBuf.Meta
                 Type tmp = Helpers.GetUnderlyingType(type);
                 if (tmp != null) type = tmp;
 
-                WireType defaultWireType;
-                isInbuiltType = (ValueMember.TryGetCoreSerializer(this, DataFormat.Default, type, out defaultWireType, false, false, false, false) != null);
+                isInbuiltType = (ValueMember.TryGetCoreSerializer(this, DataFormat.Default, type, out var defaultWireType, false, false, false, false) != null);
                 if (!isInbuiltType)
                 {
                     //Agenerate just relative to the supplied type
                     int index = FindOrAddAuto(type, false, false, false);
-                    if (index < 0) throw new ArgumentException("The type specified is not a contract-type", "type");
+                    if (index < 0) throw new ArgumentException("The type specified is not a contract-type", nameof(type));
 
                     // get the required types
                     primaryType = ((MetaType)types[index]).GetSurrogateOrBaseOrSelf(false);
@@ -202,7 +208,7 @@ namespace ProtoBuf.Meta
                 {
                     if (meta.IsList) continue;
                     string tmp = meta.Type.Namespace;
-                    if (!Helpers.IsNullOrEmpty(tmp))
+                    if (!string.IsNullOrEmpty(tmp))
                     {
                         if (tmp.StartsWith("System.")) continue;
                         if (package == null)
@@ -220,7 +226,7 @@ namespace ProtoBuf.Meta
                     }
                 }
             }
-            switch(syntax)
+            switch (syntax)
             {
                 case ProtoSyntax.Proto2:
                     headerBuilder.AppendLine(@"syntax = ""proto2"";");
@@ -231,8 +237,8 @@ namespace ProtoBuf.Meta
                 default:
                     throw new ArgumentOutOfRangeException(nameof(syntax));
             }
-            
-            if (!Helpers.IsNullOrEmpty(package))
+
+            if (!string.IsNullOrEmpty(package))
             {
                 headerBuilder.Append("package ").Append(package).Append(';');
                 Helpers.AppendLine(headerBuilder);
@@ -298,15 +304,14 @@ namespace ProtoBuf.Meta
             MetaType tmp;
             if (metaType.IsList)
             {
-                Type itemType = TypeModel.GetListItemType(this, metaType.Type);
+                Type itemType = TypeModel.GetListItemType(metaType.Type);
                 TryGetCoreSerializer(list, itemType);
             }
             else
             {
                 if (metaType.IsAutoTuple)
                 {
-                    MemberInfo[] mapping;
-                    if(MetaType.ResolveTupleConstructor(metaType.Type, out mapping) != null)
+                    if (MetaType.ResolveTupleConstructor(metaType.Type, out var mapping) != null)
                     {
                         for (int i = 0; i < mapping.Length; i++)
                         {
@@ -322,19 +327,19 @@ namespace ProtoBuf.Meta
                     foreach (ValueMember member in metaType.Fields)
                     {
                         Type type = member.ItemType;
-                        if(member.IsMap)
+                        if (member.IsMap)
                         {
                             member.ResolveMapTypes(out _, out _, out type); // don't need key-type
                         }
-                        if(type == null) type = member.MemberType;
+                        if (type == null) type = member.MemberType;
                         TryGetCoreSerializer(list, type);
                     }
                 }
-                foreach(var genericArgument in metaType.GetAllGenericArguments())
+                foreach (var genericArgument in metaType.GetAllGenericArguments())
                 {
                     TryGetCoreSerializer(list, genericArgument);
                 }
-                if(metaType.HasSubtypes)
+                if (metaType.HasSubtypes)
                 {
                     foreach (SubType subType in metaType.GetSubtypes())
                     {
@@ -359,17 +364,17 @@ namespace ProtoBuf.Meta
         private void TryGetCoreSerializer(BasicList list, Type itemType)
         {
             var coreSerializer = ValueMember.TryGetCoreSerializer(this, DataFormat.Default, itemType, out _, false, false, false, false);
-            if(coreSerializer != null)
+            if (coreSerializer != null)
             {
                 return;
             }
             int index = FindOrAddAuto(itemType, false, false, false);
-            if(index < 0)
+            if (index < 0)
             {
                 return;
             }
             var temp = ((MetaType)types[index]).GetSurrogateOrBaseOrSelf(false);
-            if(list.Contains(temp))
+            if (list.Contains(temp))
             {
                 return;
             }
@@ -380,59 +385,39 @@ namespace ProtoBuf.Meta
 
         internal RuntimeTypeModel(bool isDefault)
         {
-#if FEAT_IKVM
-            universe = new IKVM.Reflection.Universe();
-            universe.EnableMissingMemberResolution(); // needed to avoid TypedReference issue on WinRT
-#endif
             AutoAddMissingTypes = true;
             UseImplicitZeroDefaults = true;
             SetOption(OPTIONS_IsDefaultModel, isDefault);
-#if FEAT_COMPILER && !FX11 && !DEBUG
-            AutoCompile = true;
+#if FEAT_COMPILER && !DEBUG
+            try
+            {
+                AutoCompile = EnableAutoCompile();
+            }
+            catch { } // this is all kinds of brittle on things like UWP
 #endif
         }
 
-#if FEAT_IKVM
-        readonly IKVM.Reflection.Universe universe;
-        /// <summary>
-        /// Load an assembly into the model's universe
-        /// </summary>
-        public Assembly Load(string path)
+#if FEAT_COMPILER
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        internal static bool EnableAutoCompile()
         {
-            return universe.LoadFile(path);
+            try
+            {
+                var dm = new DynamicMethod("CheckCompilerAvailable", typeof(bool), new Type[] { typeof(int) });
+                var il = dm.GetILGenerator();
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldc_I4, 42);
+                il.Emit(OpCodes.Ceq);
+                il.Emit(OpCodes.Ret);
+                var func = (Predicate<int>)dm.CreateDelegate(typeof(Predicate<int>));
+                return func(42);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex);
+                return false;
+            }
         }
-        /// <summary>
-        /// Gets the IKVM Universe that relates to this model
-        /// </summary>
-        public Universe Universe { get { return universe; } }
-
-        /// <summary>
-        /// Adds support for an additional type in this model, optionally
-        /// applying inbuilt patterns. If the type is already known to the
-        /// model, the existing type is returned **without** applying
-        /// any additional behaviour.
-        /// </summary>
-        public MetaType Add(string assemblyQualifiedTypeName, bool applyDefaults)
-        {
-            Type type = universe.GetType(assemblyQualifiedTypeName, true);
-            return Add(type, applyDefaults);
-        }
-        /// <summary>
-        /// Adds support for an additional type in this model, optionally
-        /// applying inbuilt patterns. If the type is already known to the
-        /// model, the existing type is returned **without** applying
-        /// any additional behaviour.
-        /// </summary>
-        public MetaType Add(System.Type type, bool applyDefaultBehaviour)
-        {
-            return Add(MapType(type), applyDefaultBehaviour);
-        }
-        /// <summary>
-        /// Obtains the MetaType associated with a given Type for the current model,
-        /// allowing additional configuration.
-        /// </summary>
-        public MetaType this[System.Type type] { get { return this[MapType(type)]; } }
-        
 #endif
 
         /// <summary>
@@ -440,7 +425,7 @@ namespace ProtoBuf.Meta
         /// allowing additional configuration.
         /// </summary>
         public MetaType this[Type type] { get { return (MetaType)types[FindOrAddAuto(type, true, false, false)]; } }
-        
+
         internal MetaType FindWithoutAdd(Type type)
         {
             // this list is thread-safe for reading
@@ -448,7 +433,7 @@ namespace ProtoBuf.Meta
             {
                 if (metaType.Type == type)
                 {
-                    if (metaType.Pending) WaitOnLock(metaType);
+                    if (metaType.Pending) WaitOnLock();
                     return metaType;
                 }
             }
@@ -457,19 +442,21 @@ namespace ProtoBuf.Meta
             return underlyingType == null ? null : FindWithoutAdd(underlyingType);
         }
 
-        static readonly BasicList.MatchPredicate
+        private static readonly BasicList.MatchPredicate
             MetaTypeFinder = new BasicList.MatchPredicate(MetaTypeFinderImpl),
             BasicTypeFinder = new BasicList.MatchPredicate(BasicTypeFinderImpl);
-        static bool MetaTypeFinderImpl(object value, object ctx)
+
+        private static bool MetaTypeFinderImpl(object value, object ctx)
         {
             return ((MetaType)value).Type == (Type)ctx;
         }
-        static bool BasicTypeFinderImpl(object value, object ctx)
+
+        private static bool BasicTypeFinderImpl(object value, object ctx)
         {
             return ((BasicType)value).Type == (Type)ctx;
         }
 
-        private void WaitOnLock(MetaType type)
+        private void WaitOnLock()
         {
             int opaqueToken = 0;
             try
@@ -481,18 +468,19 @@ namespace ProtoBuf.Meta
                 ReleaseLock(opaqueToken);
             }
         }
-        BasicList basicTypes = new BasicList();
 
-        sealed class BasicType
+        private readonly BasicList basicTypes = new BasicList();
+
+        private sealed class BasicType
         {
-            private readonly Type type;
-            public Type Type { get { return type; } }
-            private readonly IProtoSerializer serializer;
-            public IProtoSerializer Serializer { get { return serializer; } }
+            public Type Type { get; }
+
+            public IProtoSerializer Serializer { get; }
+
             public BasicType(Type type, IProtoSerializer serializer)
             {
-                this.type = type;
-                this.serializer = serializer;
+                Type = type;
+                Serializer = serializer;
             }
         }
         internal IProtoSerializer TryGetBasicTypeSerializer(Type type)
@@ -501,23 +489,20 @@ namespace ProtoBuf.Meta
 
             if (idx >= 0) return ((BasicType)basicTypes[idx]).Serializer;
 
-            lock(basicTypes)
+            lock (basicTypes)
             { // don't need a full model lock for this
-
                 // double-checked
                 idx = basicTypes.IndexOf(BasicTypeFinder, type);
                 if (idx >= 0) return ((BasicType)basicTypes[idx]).Serializer;
 
-                WireType defaultWireType;
                 MetaType.AttributeFamily family = MetaType.GetContractFamily(this, type, null);
                 IProtoSerializer ser = family == MetaType.AttributeFamily.None
-                    ? ValueMember.TryGetCoreSerializer(this, DataFormat.Default, type, out defaultWireType, false, false, false, false)
+                    ? ValueMember.TryGetCoreSerializer(this, DataFormat.Default, type, out WireType defaultWireType, false, false, false, false)
                     : null;
 
-                if(ser != null) basicTypes.Add(new BasicType(type, ser));
+                if (ser != null) basicTypes.Add(new BasicType(type, ser));
                 return ser;
             }
-
         }
 
         internal int FindOrAddAuto(Type type, bool demand, bool addWithContractOnly, bool addEvenIfAutoDisabled)
@@ -531,7 +516,7 @@ namespace ProtoBuf.Meta
                 metaType = (MetaType)types[key];
                 if (metaType.Pending)
                 {
-                    WaitOnLock(metaType);
+                    WaitOnLock();
                 }
                 return key;
             }
@@ -549,7 +534,7 @@ namespace ProtoBuf.Meta
 
             // check for proxy types
             Type underlyingType = ResolveProxies(type);
-            if (underlyingType != null)
+            if (underlyingType != null && underlyingType != type)
             {
                 key = types.IndexOf(MetaTypeFinder, underlyingType);
                 type = underlyingType; // if new added, make it reflect the underlying type
@@ -558,6 +543,8 @@ namespace ProtoBuf.Meta
             if (key < 0)
             {
                 int opaqueToken = 0;
+                Type origType = type;
+                bool weAdded = false;
                 try
                 {
                     TakeLock(ref opaqueToken);
@@ -579,8 +566,8 @@ namespace ProtoBuf.Meta
                         }
                         metaType = Create(type);
                     }
-                    metaType.Pending = true;                    
-                    bool weAdded = false;
+
+                    metaType.Pending = true;
 
                     // double-checked
                     int winner = types.IndexOf(MetaTypeFinder, type);
@@ -603,33 +590,37 @@ namespace ProtoBuf.Meta
                 finally
                 {
                     ReleaseLock(opaqueToken);
+                    if (weAdded)
+                    {
+                        ResetKeyCache();
+                    }
                 }
             }
             return key;
         }
 
+#pragma warning disable RCS1163 // Unused parameter.
         private MetaType RecogniseCommonTypes(Type type)
+#pragma warning restore RCS1163 // Unused parameter.
         {
-//#if !NO_GENERICS
-//            if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(System.Collections.Generic.KeyValuePair<,>))
-//            {
-//                MetaType mt = new MetaType(this, type);
+            //            if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(System.Collections.Generic.KeyValuePair<,>))
+            //            {
+            //                MetaType mt = new MetaType(this, type);
 
-//                Type surrogate = typeof (KeyValuePairSurrogate<,>).MakeGenericType(type.GetGenericArguments());
+            //                Type surrogate = typeof (KeyValuePairSurrogate<,>).MakeGenericType(type.GetGenericArguments());
 
-//                mt.SetSurrogate(surrogate);
-//                mt.IncludeSerializerMethod = false;
-//                mt.Freeze();
+            //                mt.SetSurrogate(surrogate);
+            //                mt.IncludeSerializerMethod = false;
+            //                mt.Freeze();
 
-//                MetaType surrogateMeta = (MetaType)types[FindOrAddAuto(surrogate, true, true, true)]; // this forcibly adds it if needed
-//                if(surrogateMeta.IncludeSerializerMethod)
-//                { // don't blindly set - it might be frozen
-//                    surrogateMeta.IncludeSerializerMethod = false;
-//                }
-//                surrogateMeta.Freeze();
-//                return mt;
-//            }
-//#endif
+            //                MetaType surrogateMeta = (MetaType)types[FindOrAddAuto(surrogate, true, true, true)]; // this forcibly adds it if needed
+            //                if(surrogateMeta.IncludeSerializerMethod)
+            //                { // don't blindly set - it might be frozen
+            //                    surrogateMeta.IncludeSerializerMethod = false;
+            //                }
+            //                surrogateMeta.Freeze();
+            //                return mt;
+            //            }
             return null;
         }
         private MetaType Create(Type type)
@@ -658,39 +649,40 @@ namespace ProtoBuf.Meta
         /// further configuration.</returns>
         public MetaType Add(Type type, bool applyDefaultBehaviour)
         {
-            if (type == null) throw new ArgumentNullException("type");
+            if (type == null) throw new ArgumentNullException(nameof(type));
             MetaType newType = FindWithoutAdd(type);
             if (newType != null) return newType; // return existing
             int opaqueToken = 0;
 
-#if WINRT || COREFX
-            System.Reflection.TypeInfo typeInfo = System.Reflection.IntrospectionExtensions.GetTypeInfo(type);
+#if COREFX || PROFILE259
+            TypeInfo typeInfo = type.GetTypeInfo();
             if (typeInfo.IsInterface && MetaType.ienumerable.IsAssignableFrom(typeInfo)
 #else
-            if (type.IsInterface && MapType(MetaType.ienumerable).IsAssignableFrom(type)
+            if (type.IsInterface && MetaType.ienumerable.IsAssignableFrom(type)
 #endif
-                    && GetListItemType(this, type) == null)
+                    && GetListItemType(type) == null)
             {
                 throw new ArgumentException("IEnumerable[<T>] data cannot be used as a meta-type unless an Add method can be resolved");
             }
             try
             {
                 newType = RecogniseCommonTypes(type);
-                if(newType != null)
+                if (newType != null)
                 {
-                    if(!applyDefaultBehaviour) {
+                    if (!applyDefaultBehaviour)
+                    {
                         throw new ArgumentException(
                             "Default behaviour must be observed for certain types with special handling; " + type.FullName,
-                            "applyDefaultBehaviour");
+                            nameof(applyDefaultBehaviour));
                     }
                     // we should assume that type is fully configured, though; no need to re-run:
                     applyDefaultBehaviour = false;
                 }
-                if(newType == null) newType = Create(type);
+                if (newType == null) newType = Create(type);
                 newType.Pending = true;
                 TakeLock(ref opaqueToken);
                 // double checked
-                if (FindWithoutAdd(type) != null) throw new ArgumentException("Duplicate type", "type");
+                if (FindWithoutAdd(type) != null) throw new ArgumentException("Duplicate type", nameof(type));
                 ThrowIfFrozen();
                 types.Add(newType);
                 if (applyDefaultBehaviour) { newType.ApplyDefaultBehaviour(); }
@@ -699,12 +691,13 @@ namespace ProtoBuf.Meta
             finally
             {
                 ReleaseLock(opaqueToken);
+                ResetKeyCache();
             }
-            
+
             return newType;
         }
 
-#if FEAT_COMPILER && !FX11
+#if FEAT_COMPILER
         /// <summary>
         /// Should serializers be compiled on demand? It may be useful
         /// to disable this for debugging purposes.
@@ -723,7 +716,8 @@ namespace ProtoBuf.Meta
         public bool AutoAddMissingTypes
         {
             get { return GetOption(OPTIONS_AutoAddMissingTypes); }
-            set {
+            set
+            {
                 if (!value && GetOption(OPTIONS_IsDefaultModel))
                 {
                     throw new InvalidOperationException("The default model must allow missing types");
@@ -739,6 +733,7 @@ namespace ProtoBuf.Meta
         {
             if (GetOption(OPTIONS_Frozen)) throw new InvalidOperationException("The model cannot be changed once frozen");
         }
+
         /// <summary>
         /// Prevents further changes to this model
         /// </summary>
@@ -757,6 +752,7 @@ namespace ProtoBuf.Meta
         {
             return GetKey(type, false, true);
         }
+
         internal int GetKey(Type type, bool demand, bool getBaseKey)
         {
             Helpers.DebugAssert(type != null);
@@ -769,7 +765,7 @@ namespace ProtoBuf.Meta
                     if (getBaseKey)
                     {
                         mt = MetaType.GetRootType(mt);
-                        typeIndex = FindOrAddAuto(mt.Type, true, true, false);                        
+                        typeIndex = FindOrAddAuto(mt.Type, true, true, false);
                     }
                 }
                 return typeIndex;
@@ -784,62 +780,56 @@ namespace ProtoBuf.Meta
                 throw new ProtoException(ex.Message + " (" + type.FullName + ")", ex);
             }
         }
+
         /// <summary>
         /// Writes a protocol-buffer representation of the given instance to the supplied stream.
         /// </summary>
         /// <param name="key">Represents the type (including inheritance) to consider.</param>
         /// <param name="value">The existing instance to be serialized (cannot be null).</param>
         /// <param name="dest">The destination stream to write to.</param>
-        protected internal override void Serialize(int key, object value, ProtoWriter dest)
+        /// <param name="state">Writer state</param>
+        protected internal override void Serialize(ProtoWriter dest, ref ProtoWriter.State state, int key, object value)
         {
-#if FEAT_IKVM
-            throw new NotSupportedException();
-#else
             //Helpers.DebugWriteLine("Serialize", value);
-            ((MetaType)types[key]).Serializer.Write(value, dest);
-#endif
+            ((MetaType)types[key]).Serializer.Write(dest, ref state, value);
         }
+
         /// <summary>
         /// Applies a protocol-buffer stream to an existing instance (which may be null).
         /// </summary>
         /// <param name="key">Represents the type (including inheritance) to consider.</param>
         /// <param name="value">The existing instance to be modified (can be null).</param>
+        /// <param name="state">Reader state</param>
         /// <param name="source">The binary stream to apply to the instance (cannot be null).</param>
         /// <returns>The updated instance; this may be different to the instance argument if
         /// either the original instance was null, or the stream defines a known sub-type of the
         /// original instance.</returns>
-        protected internal override object Deserialize(int key, object value, ProtoReader source)
+        protected internal override object DeserializeCore(ProtoReader source, ref ProtoReader.State state, int key, object value)
         {
-#if FEAT_IKVM
-            throw new NotSupportedException();
-#else
             //Helpers.DebugWriteLine("Deserialize", value);
             IProtoSerializer ser = ((MetaType)types[key]).Serializer;
-            if (value == null && Helpers.IsValueType(ser.ExpectedType)) {
-                if(ser.RequiresOldValue) value = Activator.CreateInstance(ser.ExpectedType);
-                return ser.Read(value, source);
-            } else {
-                return ser.Read(value, source);
+            if (value == null && Helpers.IsValueType(ser.ExpectedType))
+            {
+                if (ser.RequiresOldValue) value = Activator.CreateInstance(ser.ExpectedType);
+                return ser.Read(source, ref state, value);
             }
-#endif
+            else
+            {
+                return ser.Read(source, ref state, value);
+            }
         }
 
 #if FEAT_COMPILER
         // this is used by some unit-tests; do not remove
         internal Compiler.ProtoSerializer GetSerializer(IProtoSerializer serializer, bool compiled)
         {
-#if FEAT_IKVM
-            throw new NotSupportedException();
-#else
-            if (serializer == null) throw new ArgumentNullException("serializer");
-#if FEAT_COMPILER && !FX11
+            if (serializer == null) throw new ArgumentNullException(nameof(serializer));
+#if FEAT_COMPILER
             if (compiled) return Compiler.CompilerContext.BuildSerializer(serializer, this);
 #endif
             return new Compiler.ProtoSerializer(serializer.Write);
-#endif
         }
 
-#if !FX11
         /// <summary>
         /// Compiles the serializers individually; this is *not* a full
         /// standalone compile, but can significantly boost performance
@@ -853,7 +843,7 @@ namespace ProtoBuf.Meta
                 type.CompileInPlace();
             }
         }
-#endif
+
 #endif
         //internal override IProtoSerializer GetTypeSerializer(Type type)
         //{   // this list is thread-safe for reading
@@ -867,7 +857,6 @@ namespace ProtoBuf.Meta
 
         //}
 
-        
 #if FEAT_COMPILER
         private void BuildAllSerializers()
         {
@@ -881,7 +870,7 @@ namespace ProtoBuf.Meta
                     throw new InvalidOperationException("No serializer available for " + mt.Type.Name);
             }
         }
-#if !SILVERLIGHT
+
         internal sealed class SerializerPair : IComparable
         {
             int IComparable.CompareTo(object obj)
@@ -943,13 +932,23 @@ namespace ProtoBuf.Meta
             CompilerOptions options = new CompilerOptions();
             return Compile(options);
         }
-        static ILGenerator Override(TypeBuilder type, string name)
+
+        private static ILGenerator Override(TypeBuilder type, string name)
         {
-            MethodInfo baseMethod = type.BaseType.GetMethod(name, BindingFlags.NonPublic | BindingFlags.Instance);
+            MethodInfo baseMethod;
+            try
+            {
+                baseMethod = type.BaseType.GetMethod(name, BindingFlags.NonPublic | BindingFlags.Instance);
+            }
+            catch (Exception ex)
+            {
+                throw new ArgumentException($"Unable to resolve '{name}': {ex.Message}", nameof(name), ex);
+            }
 
             ParameterInfo[] parameters = baseMethod.GetParameters();
             Type[] paramTypes = new Type[parameters.Length];
-            for(int i = 0 ; i < paramTypes.Length ; i++) {
+            for (int i = 0; i < paramTypes.Length; i++)
+            {
                 paramTypes[i] = parameters[i].ParameterType;
             }
             MethodBuilder newMethod = type.DefineMethod(baseMethod.Name,
@@ -959,46 +958,6 @@ namespace ProtoBuf.Meta
             return il;
         }
 
-#if FEAT_IKVM
-        /// <summary>
-        /// Inspect the model, and resolve all related types
-        /// </summary>
-        public void Cascade()
-        {
-            BuildAllSerializers();
-        }
-        /// <summary>
-        /// Translate a System.Type into the universe's type representation
-        /// </summary>
-        protected internal override Type MapType(System.Type type, bool demand)
-        {
-            if (type == null) return null;
-#if DEBUG
-            if (type.Assembly == typeof(IKVM.Reflection.Type).Assembly)
-            {
-                throw new InvalidOperationException(string.Format(
-                    "Somebody is passing me IKVM types! {0} should be fully-qualified at the call-site",
-                    type.Name));
-            }
-#endif
-            Type result = universe.GetType(type.AssemblyQualifiedName);
-            
-            if(result == null)
-            {
-                // things also tend to move around... *a lot* - especially in WinRT; search all as a fallback strategy
-                foreach (Assembly a in universe.GetAssemblies())
-                {
-                    result = a.GetType(type.FullName);
-                    if (result != null) break;
-                }
-                if (result == null && demand)
-                {
-                    throw new InvalidOperationException("Unable to map type: " + type.AssemblyQualifiedName);
-                }
-            }
-            return result;
-        }
-#endif
         /// <summary>
         /// Represents configuration options for compiling a model to 
         /// a standalone assembly.
@@ -1010,35 +969,32 @@ namespace ProtoBuf.Meta
             /// </summary>
             public void SetFrameworkOptions(MetaType from)
             {
-                if (from == null) throw new ArgumentNullException("from");
+                if (from == null) throw new ArgumentNullException(nameof(from));
                 AttributeMap[] attribs = AttributeMap.Create(from.Model, Helpers.GetAssembly(from.Type));
                 foreach (AttributeMap attrib in attribs)
                 {
                     if (attrib.AttributeType.FullName == "System.Runtime.Versioning.TargetFrameworkAttribute")
                     {
-                        object tmp;
-                        if (attrib.TryGet("FrameworkName", out tmp)) TargetFrameworkName = (string)tmp;
+                        if (attrib.TryGet("FrameworkName", out var tmp)) TargetFrameworkName = (string)tmp;
                         if (attrib.TryGet("FrameworkDisplayName", out tmp)) TargetFrameworkDisplayName = (string)tmp;
                         break;
                     }
                 }
             }
 
-            private string targetFrameworkName, targetFrameworkDisplayName, typeName, outputPath, imageRuntimeVersion;
-            private int metaDataVersion;
             /// <summary>
             /// The TargetFrameworkAttribute FrameworkName value to burn into the generated assembly
             /// </summary>
-            public string TargetFrameworkName { get { return targetFrameworkName; } set { targetFrameworkName = value; } }
+            public string TargetFrameworkName { get; set; }
 
             /// <summary>
             /// The TargetFrameworkAttribute FrameworkDisplayName value to burn into the generated assembly
             /// </summary>
-            public string TargetFrameworkDisplayName { get { return targetFrameworkDisplayName; } set { targetFrameworkDisplayName = value; } }
+            public string TargetFrameworkDisplayName { get; set; }
             /// <summary>
             /// The name of the TypeModel class to create
             /// </summary>
-            public string TypeName { get { return typeName; } set { typeName = value; } }
+            public string TypeName { get; set; }
 
 #if COREFX
             internal const string NoPersistence = "Assembly persistence not supported on this runtime";
@@ -1049,39 +1005,22 @@ namespace ProtoBuf.Meta
 #if COREFX
             [Obsolete(NoPersistence)]
 #endif
-            public string OutputPath { get { return outputPath; } set { outputPath = value; } }
+            public string OutputPath { get; set; }
             /// <summary>
             /// The runtime version for the generated assembly
             /// </summary>
-            public string ImageRuntimeVersion { get { return imageRuntimeVersion; } set { imageRuntimeVersion = value; } }
+            public string ImageRuntimeVersion { get; set; }
             /// <summary>
             /// The runtime version for the generated assembly
             /// </summary>
-            public int MetaDataVersion { get { return metaDataVersion; } set { metaDataVersion = value; } }
+            public int MetaDataVersion { get; set; }
 
-
-            private Accessibility accessibility = Accessibility.Public;
             /// <summary>
             /// The acecssibility of the generated serializer
             /// </summary>
-            public Accessibility Accessibility { get { return accessibility; } set { accessibility = value; } }
-
-#if FEAT_IKVM
-            /// <summary>
-            /// The name of the container that holds the key pair.
-            /// </summary>
-            public string KeyContainer { get; set; }
-            /// <summary>
-            /// The path to a file that hold the key pair.
-            /// </summary>
-            public string KeyFile { get; set; }
-
-            /// <summary>
-            /// The public  key to sign the file with.
-            /// </summary>
-            public string PublicKey { get; set; }
-#endif
+            public Accessibility Accessibility { get; set; }
         }
+
         /// <summary>
         /// Type accessibility
         /// </summary>
@@ -1108,9 +1047,13 @@ namespace ProtoBuf.Meta
         /// <returns>An instance of the newly created compiled type-model</returns>
         public TypeModel Compile(string name, string path)
         {
-            CompilerOptions options = new CompilerOptions();
-            options.TypeName = name;
-            options.OutputPath = path;
+            var options = new CompilerOptions()
+            {
+                TypeName = name,
+#pragma warning disable CS0618
+                OutputPath = path,
+#pragma warning restore CS0618
+            };
             return Compile(options);
         }
 #endif
@@ -1122,23 +1065,22 @@ namespace ProtoBuf.Meta
         /// <returns>An instance of the newly created compiled type-model</returns>
         public TypeModel Compile(CompilerOptions options)
         {
-            if (options == null) throw new ArgumentNullException("options");
+            if (options == null) throw new ArgumentNullException(nameof(options));
             string typeName = options.TypeName;
 #pragma warning disable 0618
             string path = options.OutputPath;
 #pragma warning restore 0618
             BuildAllSerializers();
             Freeze();
-            bool save = !Helpers.IsNullOrEmpty(path);
-            if (Helpers.IsNullOrEmpty(typeName))
+            bool save = !string.IsNullOrEmpty(path);
+            if (string.IsNullOrEmpty(typeName))
             {
                 if (save) throw new ArgumentNullException("typeName");
                 typeName = Guid.NewGuid().ToString();
             }
 
-
             string assemblyName, moduleName;
-            if(path == null)
+            if (path == null)
             {
                 assemblyName = typeName;
                 moduleName = assemblyName + ".dll";
@@ -1149,39 +1091,15 @@ namespace ProtoBuf.Meta
                 moduleName = assemblyName + System.IO.Path.GetExtension(path);
             }
 
-#if FEAT_IKVM
-            IKVM.Reflection.AssemblyName an = new IKVM.Reflection.AssemblyName();
-            an.Name = assemblyName;
-            AssemblyBuilder asm = universe.DefineDynamicAssembly(an, AssemblyBuilderAccess.Save);
-            if (!Helpers.IsNullOrEmpty(options.KeyFile))
-            {
-                asm.__SetAssemblyKeyPair(new StrongNameKeyPair(File.OpenRead(options.KeyFile)));
-            }
-            else if (!Helpers.IsNullOrEmpty(options.KeyContainer))
-            {
-                asm.__SetAssemblyKeyPair(new StrongNameKeyPair(options.KeyContainer));
-            }
-            else if (!Helpers.IsNullOrEmpty(options.PublicKey))
-            {
-                asm.__SetAssemblyPublicKey(FromHex(options.PublicKey));
-            }
-            if(!Helpers.IsNullOrEmpty(options.ImageRuntimeVersion) && options.MetaDataVersion != 0)
-            {
-                asm.__SetImageRuntimeVersion(options.ImageRuntimeVersion, options.MetaDataVersion);
-            }
-            ModuleBuilder module = asm.DefineDynamicModule(moduleName, path);
-#elif COREFX
-            AssemblyName an = new AssemblyName();
-            an.Name = assemblyName;
+#if COREFX
+            AssemblyName an = new AssemblyName { Name = assemblyName };
             AssemblyBuilder asm = AssemblyBuilder.DefineDynamicAssembly(an,
                 AssemblyBuilderAccess.Run);
             ModuleBuilder module = asm.DefineDynamicModule(moduleName);
 #else
-            AssemblyName an = new AssemblyName();
-            an.Name = assemblyName;
+            AssemblyName an = new AssemblyName { Name = assemblyName };
             AssemblyBuilder asm = AppDomain.CurrentDomain.DefineDynamicAssembly(an,
-                (save ? AssemblyBuilderAccess.RunAndSave : AssemblyBuilderAccess.Run)
-                );
+                save ? AssemblyBuilderAccess.RunAndSave : AssemblyBuilderAccess.Run);
             ModuleBuilder module = save ? asm.DefineDynamicModule(moduleName, path)
                                         : asm.DefineDynamicModule(moduleName);
 #endif
@@ -1190,17 +1108,9 @@ namespace ProtoBuf.Meta
 
             TypeBuilder type = WriteBasicTypeModel(options, typeName, module);
 
-            int index;
-            bool hasInheritance;
-            SerializerPair[] methodPairs;
-            Compiler.CompilerContext.ILVersion ilVersion;
-            WriteSerializers(options, assemblyName, type, out index, out hasInheritance, out methodPairs, out ilVersion);
+            WriteSerializers(options, assemblyName, type, out var index, out var hasInheritance, out var methodPairs, out var ilVersion);
 
-            ILGenerator il;
-            int knownTypesCategory;
-            FieldBuilder knownTypes;
-            Type knownTypesLookupType;
-            WriteGetKeyImpl(type, hasInheritance, methodPairs, ilVersion, assemblyName, out il, out knownTypesCategory, out knownTypes, out knownTypesLookupType);
+            WriteGetKeyImpl(type, hasInheritance, methodPairs, ilVersion, assemblyName, out var il, out var knownTypesCategory, out var knownTypes, out var knownTypesLookupType);
 
             // trivial flags
             il = Override(type, "SerializeDateTimeKind");
@@ -1210,15 +1120,14 @@ namespace ProtoBuf.Meta
 
             Compiler.CompilerContext ctx = WriteSerializeDeserialize(assemblyName, type, methodPairs, ilVersion, ref il);
 
-            WriteConstructors(type, ref index, methodPairs, ref il, knownTypesCategory, knownTypes, knownTypesLookupType, ctx);
-
+            WriteConstructors(type, ref index, methodPairs, knownTypesCategory, knownTypes, knownTypesLookupType, ctx);
 
 #if COREFX
             Type finalType = type.CreateTypeInfo().AsType();
 #else
             Type finalType = type.CreateType();
 #endif
-            if (!Helpers.IsNullOrEmpty(path))
+            if (!string.IsNullOrEmpty(path))
             {
 #if COREFX
                 throw new NotSupportedException(CompilerOptions.NoPersistence);
@@ -1226,7 +1135,8 @@ namespace ProtoBuf.Meta
                 try
                 {
                     asm.Save(path);
-                } catch(IOException ex)
+                }
+                catch (IOException ex)
                 {
                     // advertise the file info
                     throw new IOException(path + ", " + ex.Message, ex);
@@ -1234,27 +1144,17 @@ namespace ProtoBuf.Meta
                 Helpers.DebugWriteLine("Wrote dll:" + path);
 #endif
             }
-#if FEAT_IKVM
-            return null;
-#else
             return (TypeModel)Activator.CreateInstance(finalType);
-#endif
         }
-#if FEAT_IKVM
-        private byte[] FromHex(string value)
+
+#pragma warning disable RCS1163 // Unused parameter.
+        private void WriteConstructors(TypeBuilder type, ref int index, SerializerPair[] methodPairs, int knownTypesCategory, FieldBuilder knownTypes, Type knownTypesLookupType, Compiler.CompilerContext ctx)
+#pragma warning restore RCS1163 // Unused parameter.
         {
-            if (Helpers.IsNullOrEmpty(value)) throw new ArgumentNullException("value");
-            int len = value.Length / 2;
-            byte[] result = new byte[len];
-            for(int i = 0 ; i < len ; i++)
-            {
-                result[i] = Convert.ToByte(value.Substring(i * 2, 2), 16);
-            }
-            return result;
-        }
-#endif
-        private void WriteConstructors(TypeBuilder type, ref int index, SerializerPair[] methodPairs, ref ILGenerator il, int knownTypesCategory, FieldBuilder knownTypes, Type knownTypesLookupType, Compiler.CompilerContext ctx)
-        {
+            var il = Override(type, nameof(TypeModel.GetInternStrings));
+            il.Emit(InternStrings ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
+            il.Emit(OpCodes.Ret);
+
             type.DefineDefaultConstructor(MethodAttributes.Public);
             il = type.DefineTypeInitializer().GetILGenerator();
             switch (knownTypesCategory)
@@ -1262,14 +1162,14 @@ namespace ProtoBuf.Meta
                 case KnownTypes_Array:
                     {
                         Compiler.CompilerContext.LoadValue(il, types.Count);
-                        il.Emit(OpCodes.Newarr, ctx.MapType(typeof(System.Type)));
+                        il.Emit(OpCodes.Newarr, typeof(Type));
                         index = 0;
                         foreach (SerializerPair pair in methodPairs)
                         {
                             il.Emit(OpCodes.Dup);
                             Compiler.CompilerContext.LoadValue(il, index);
                             il.Emit(OpCodes.Ldtoken, pair.Type.Type);
-                            il.EmitCall(OpCodes.Call, ctx.MapType(typeof(System.Type)).GetMethod("GetTypeFromHandle"), null);
+                            il.EmitCall(OpCodes.Call, typeof(Type).GetMethod("GetTypeFromHandle"), null);
                             il.Emit(OpCodes.Stelem_Ref);
                             index++;
                         }
@@ -1281,14 +1181,14 @@ namespace ProtoBuf.Meta
                     {
                         Compiler.CompilerContext.LoadValue(il, types.Count);
                         //LocalBuilder loc = il.DeclareLocal(knownTypesLookupType);
-                        il.Emit(OpCodes.Newobj, knownTypesLookupType.GetConstructor(new Type[] { MapType(typeof(int)) }));
+                        il.Emit(OpCodes.Newobj, knownTypesLookupType.GetConstructor(new Type[] { typeof(int) }));
                         il.Emit(OpCodes.Stsfld, knownTypes);
                         int typeIndex = 0;
                         foreach (SerializerPair pair in methodPairs)
                         {
                             il.Emit(OpCodes.Ldsfld, knownTypes);
                             il.Emit(OpCodes.Ldtoken, pair.Type.Type);
-                            il.EmitCall(OpCodes.Call, ctx.MapType(typeof(System.Type)).GetMethod("GetTypeFromHandle"), null);
+                            il.EmitCall(OpCodes.Call, typeof(Type).GetMethod("GetTypeFromHandle"), null);
                             int keyIndex = typeIndex++, lastKey = pair.BaseKey;
                             if (lastKey != pair.MetaKey) // not a base-type; need to give the index of the base-type
                             {
@@ -1303,7 +1203,7 @@ namespace ProtoBuf.Meta
                                 }
                             }
                             Compiler.CompilerContext.LoadValue(il, keyIndex);
-                            il.EmitCall(OpCodes.Callvirt, knownTypesLookupType.GetMethod("Add", new Type[] { MapType(typeof(System.Type)), MapType(typeof(int)) }), null);
+                            il.EmitCall(OpCodes.Callvirt, knownTypesLookupType.GetMethod("Add", new Type[] { typeof(System.Type), typeof(int) }), null);
                         }
                         il.Emit(OpCodes.Ret);
                     }
@@ -1311,14 +1211,14 @@ namespace ProtoBuf.Meta
                 case KnownTypes_Hashtable:
                     {
                         Compiler.CompilerContext.LoadValue(il, types.Count);
-                        il.Emit(OpCodes.Newobj, knownTypesLookupType.GetConstructor(new Type[] { MapType(typeof(int)) }));
+                        il.Emit(OpCodes.Newobj, knownTypesLookupType.GetConstructor(new Type[] { typeof(int) }));
                         il.Emit(OpCodes.Stsfld, knownTypes);
                         int typeIndex = 0;
                         foreach (SerializerPair pair in methodPairs)
                         {
                             il.Emit(OpCodes.Ldsfld, knownTypes);
                             il.Emit(OpCodes.Ldtoken, pair.Type.Type);
-                            il.EmitCall(OpCodes.Call, ctx.MapType(typeof(System.Type)).GetMethod("GetTypeFromHandle"), null);
+                            il.EmitCall(OpCodes.Call, typeof(Type).GetMethod("GetTypeFromHandle"), null);
                             int keyIndex = typeIndex++, lastKey = pair.BaseKey;
                             if (lastKey != pair.MetaKey) // not a base-type; need to give the index of the base-type
                             {
@@ -1333,8 +1233,8 @@ namespace ProtoBuf.Meta
                                 }
                             }
                             Compiler.CompilerContext.LoadValue(il, keyIndex);
-                            il.Emit(OpCodes.Box, MapType(typeof(int)));
-                            il.EmitCall(OpCodes.Callvirt, knownTypesLookupType.GetMethod("Add", new Type[] { MapType(typeof(object)), MapType(typeof(object)) }), null);
+                            il.Emit(OpCodes.Box, typeof(int));
+                            il.EmitCall(OpCodes.Callvirt, knownTypesLookupType.GetMethod("Add", new Type[] { typeof(object), typeof(object) }), null);
                         }
                         il.Emit(OpCodes.Ret);
                     }
@@ -1346,36 +1246,39 @@ namespace ProtoBuf.Meta
 
         private Compiler.CompilerContext WriteSerializeDeserialize(string assemblyName, TypeBuilder type, SerializerPair[] methodPairs, Compiler.CompilerContext.ILVersion ilVersion, ref ILGenerator il)
         {
-            il = Override(type, "Serialize");
-            Compiler.CompilerContext ctx = new Compiler.CompilerContext(il, false, true, methodPairs, this, ilVersion, assemblyName, MapType(typeof(object)), "Serialize " + type.Name);
-            // arg0 = this, arg1 = key, arg2=obj, arg3=dest
+            il = Override(type, nameof(TypeModel.Serialize));
+            Compiler.CompilerContext ctx = new Compiler.CompilerContext(il, false, true, methodPairs, this, ilVersion, assemblyName, typeof(object), "Serialize " + type.Name);
+            // arg0 = this, arg1 = dest, arg2 = state, arg3 = key, arg4 = obj
             Compiler.CodeLabel[] jumpTable = new Compiler.CodeLabel[types.Count];
             for (int i = 0; i < jumpTable.Length; i++)
             {
                 jumpTable[i] = ctx.DefineLabel();
             }
-            il.Emit(OpCodes.Ldarg_1);
+            il.Emit(OpCodes.Ldarg_3);
             ctx.Switch(jumpTable);
             ctx.Return();
             for (int i = 0; i < jumpTable.Length; i++)
             {
                 SerializerPair pair = methodPairs[i];
                 ctx.MarkLabel(jumpTable[i]);
+                il.Emit(OpCodes.Ldarg_1);
                 il.Emit(OpCodes.Ldarg_2);
+                il.Emit(OpCodes.Ldarg_S, (byte)4);
                 ctx.CastFromObject(pair.Type.Type);
-                il.Emit(OpCodes.Ldarg_3);
                 il.EmitCall(OpCodes.Call, pair.Serialize, null);
                 ctx.Return();
             }
 
-            il = Override(type, "Deserialize");
-            ctx = new Compiler.CompilerContext(il, false, false, methodPairs, this, ilVersion, assemblyName, MapType(typeof(object)), "Deserialize " + type.Name);
-            // arg0 = this, arg1 = key, arg2=obj, arg3=source
+            il = Override(type, nameof(TypeModel.DeserializeCore));
+            ctx = new Compiler.CompilerContext(il, false, false, methodPairs, this, ilVersion, assemblyName, typeof(object), "Deserialize " + type.Name);
+
+            // arg0 = this, arg1 = source, arg2 = state, arg3 = key, arg4 = obj
+
             for (int i = 0; i < jumpTable.Length; i++)
             {
                 jumpTable[i] = ctx.DefineLabel();
             }
-            il.Emit(OpCodes.Ldarg_1);
+            il.Emit(OpCodes.Ldarg_3);
             ctx.Switch(jumpTable);
             ctx.LoadNullRef();
             ctx.Return();
@@ -1386,16 +1289,18 @@ namespace ProtoBuf.Meta
                 Type keyType = pair.Type.Type;
                 if (Helpers.IsValueType(keyType))
                 {
+                    il.Emit(OpCodes.Ldarg_1);
                     il.Emit(OpCodes.Ldarg_2);
-                    il.Emit(OpCodes.Ldarg_3);
-                    il.EmitCall(OpCodes.Call, EmitBoxedSerializer(type, i, keyType, methodPairs, this, ilVersion, assemblyName), null);
+                    il.Emit(OpCodes.Ldarg_S, (byte)4);
+                    il.EmitCall(OpCodes.Call, EmitBoxedDeserializer(type, i, keyType, methodPairs, this, ilVersion, assemblyName), null);
                     ctx.Return();
                 }
                 else
                 {
+                    il.Emit(OpCodes.Ldarg_1);
                     il.Emit(OpCodes.Ldarg_2);
+                    il.Emit(OpCodes.Ldarg_S, (byte)4);
                     ctx.CastFromObject(keyType);
-                    il.Emit(OpCodes.Ldarg_3);
                     il.EmitCall(OpCodes.Call, pair.Deserialize, null);
                     ctx.Return();
                 }
@@ -1406,35 +1311,18 @@ namespace ProtoBuf.Meta
         private const int KnownTypes_Array = 1, KnownTypes_Dictionary = 2, KnownTypes_Hashtable = 3, KnownTypes_ArrayCutoff = 20;
         private void WriteGetKeyImpl(TypeBuilder type, bool hasInheritance, SerializerPair[] methodPairs, Compiler.CompilerContext.ILVersion ilVersion, string assemblyName, out ILGenerator il, out int knownTypesCategory, out FieldBuilder knownTypes, out Type knownTypesLookupType)
         {
-
             il = Override(type, "GetKeyImpl");
-            Compiler.CompilerContext ctx = new Compiler.CompilerContext(il, false, false, methodPairs, this, ilVersion, assemblyName, MapType(typeof(System.Type), true), "GetKeyImpl");
-
+            Compiler.CompilerContext ctx = new Compiler.CompilerContext(il, false, false, methodPairs, this, ilVersion, assemblyName, typeof(System.Type), "GetKeyImpl");
 
             if (types.Count <= KnownTypes_ArrayCutoff)
             {
                 knownTypesCategory = KnownTypes_Array;
-                knownTypesLookupType = MapType(typeof(System.Type[]), true);
+                knownTypesLookupType = typeof(System.Type[]);
             }
             else
             {
-#if NO_GENERICS
-                knownTypesLookupType = null;
-#else
-                knownTypesLookupType = MapType(typeof(System.Collections.Generic.Dictionary<System.Type, int>), false);
-#endif
-
-#if !COREFX
-                if (knownTypesLookupType == null)
-                {
-                    knownTypesLookupType = MapType(typeof(Hashtable), true);
-                    knownTypesCategory = KnownTypes_Hashtable;
-                }
-                else
-#endif
-                {
-                    knownTypesCategory = KnownTypes_Dictionary;
-                }
+                knownTypesLookupType = typeof(System.Collections.Generic.Dictionary<System.Type, int>);
+                knownTypesCategory = KnownTypes_Dictionary;
             }
             knownTypes = type.DefineField("knownTypes", knownTypesLookupType, FieldAttributes.Private | FieldAttributes.InitOnly | FieldAttributes.Static);
 
@@ -1445,11 +1333,11 @@ namespace ProtoBuf.Meta
                         il.Emit(OpCodes.Ldsfld, knownTypes);
                         il.Emit(OpCodes.Ldarg_1);
                         // note that Array.IndexOf is not supported under CF
-                        il.EmitCall(OpCodes.Callvirt, MapType(typeof(IList)).GetMethod(
-                            "IndexOf", new Type[] { MapType(typeof(object)) }), null);
+                        il.EmitCall(OpCodes.Callvirt, typeof(IList).GetMethod(
+                            "IndexOf", new Type[] { typeof(object) }), null);
                         if (hasInheritance)
                         {
-                            il.DeclareLocal(MapType(typeof(int))); // loc-0
+                            il.DeclareLocal(typeof(int)); // loc-0
                             il.Emit(OpCodes.Dup);
                             il.Emit(OpCodes.Stloc_0);
 
@@ -1507,7 +1395,7 @@ namespace ProtoBuf.Meta
                     break;
                 case KnownTypes_Dictionary:
                     {
-                        LocalBuilder result = il.DeclareLocal(MapType(typeof(int)));
+                        LocalBuilder result = il.DeclareLocal(typeof(int));
                         Label otherwise = il.DefineLabel();
                         il.Emit(OpCodes.Ldsfld, knownTypes);
                         il.Emit(OpCodes.Ldarg_1);
@@ -1529,20 +1417,15 @@ namespace ProtoBuf.Meta
                         il.EmitCall(OpCodes.Callvirt, knownTypesLookupType.GetProperty("Item").GetGetMethod(), null);
                         il.Emit(OpCodes.Dup);
                         il.Emit(OpCodes.Brfalse_S, otherwise);
-#if FX11
-                        il.Emit(OpCodes.Unbox, MapType(typeof(int)));
-                        il.Emit(OpCodes.Ldobj, MapType(typeof(int)));
-#else
                         if (ilVersion == Compiler.CompilerContext.ILVersion.Net1)
                         {
-                            il.Emit(OpCodes.Unbox, MapType(typeof(int)));
-                            il.Emit(OpCodes.Ldobj, MapType(typeof(int)));
+                            il.Emit(OpCodes.Unbox, typeof(int));
+                            il.Emit(OpCodes.Ldobj, typeof(int));
                         }
                         else
                         {
-                            il.Emit(OpCodes.Unbox_Any, MapType(typeof(int)));
+                            il.Emit(OpCodes.Unbox_Any, typeof(int));
                         }
-#endif
                         il.Emit(OpCodes.Ret);
                         il.MarkLabel(otherwise);
                         il.Emit(OpCodes.Pop);
@@ -1564,21 +1447,13 @@ namespace ProtoBuf.Meta
             methodPairs = new SerializerPair[types.Count];
             foreach (MetaType metaType in types)
             {
-                MethodBuilder writeMethod = type.DefineMethod("Write"
-#if DEBUG
- + metaType.Type.Name
-#endif
-,
+                MethodBuilder writeMethod = type.DefineMethod("Write" + metaType.Type.Name,
                     MethodAttributes.Private | MethodAttributes.Static, CallingConventions.Standard,
-                    MapType(typeof(void)), new Type[] { metaType.Type, MapType(typeof(ProtoWriter)) });
+                    typeof(void), new Type[] { typeof(ProtoWriter), ProtoWriter.ByRefStateType, metaType.Type });
 
-                MethodBuilder readMethod = type.DefineMethod("Read"
-#if DEBUG
- + metaType.Type.Name
-#endif
-,
+                MethodBuilder readMethod = type.DefineMethod("Read" + metaType.Type.Name,
                     MethodAttributes.Private | MethodAttributes.Static, CallingConventions.Standard,
-                    metaType.Type, new Type[] { metaType.Type, MapType(typeof(ProtoReader)) });
+                    metaType.Type, new Type[] { typeof(ProtoReader), ProtoReader.State.ByRefStateType, metaType.Type });
 
                 SerializerPair pair = new SerializerPair(
                     GetKey(metaType.Type, true, false), GetKey(metaType.Type, true, true), metaType,
@@ -1622,7 +1497,7 @@ namespace ProtoBuf.Meta
 
         private TypeBuilder WriteBasicTypeModel(CompilerOptions options, string typeName, ModuleBuilder module)
         {
-            Type baseType = MapType(typeof(TypeModel));
+            Type baseType = typeof(TypeModel);
 #if COREFX
             TypeAttributes typeAttributes = (baseType.GetTypeInfo().Attributes & ~TypeAttributes.Abstract) | TypeAttributes.Sealed;
 #else
@@ -1633,26 +1508,25 @@ namespace ProtoBuf.Meta
                 typeAttributes &= ~TypeAttributes.Public;
             }
 
-            TypeBuilder type = module.DefineType(typeName, typeAttributes, baseType);
-            return type;
+            return module.DefineType(typeName, typeAttributes, baseType);
         }
 
         private void WriteAssemblyAttributes(CompilerOptions options, string assemblyName, AssemblyBuilder asm)
         {
-            if (!Helpers.IsNullOrEmpty(options.TargetFrameworkName))
+            if (!string.IsNullOrEmpty(options.TargetFrameworkName))
             {
                 // get [TargetFramework] from mscorlib/equivalent and burn into the new assembly
                 Type versionAttribType = null;
                 try
                 { // this is best-endeavours only
-                    versionAttribType = GetType("System.Runtime.Versioning.TargetFrameworkAttribute", Helpers.GetAssembly(MapType(typeof(string))));
+                    versionAttribType = TypeModel.ResolveKnownType("System.Runtime.Versioning.TargetFrameworkAttribute", Helpers.GetAssembly(typeof(string)));
                 }
                 catch { /* don't stress */ }
                 if (versionAttribType != null)
                 {
                     PropertyInfo[] props;
                     object[] propValues;
-                    if (Helpers.IsNullOrEmpty(options.TargetFrameworkDisplayName))
+                    if (string.IsNullOrEmpty(options.TargetFrameworkDisplayName))
                     {
                         props = new PropertyInfo[0];
                         propValues = new object[0];
@@ -1663,7 +1537,7 @@ namespace ProtoBuf.Meta
                         propValues = new object[1] { options.TargetFrameworkDisplayName };
                     }
                     CustomAttributeBuilder builder = new CustomAttributeBuilder(
-                        versionAttribType.GetConstructor(new Type[] { MapType(typeof(string)) }),
+                        versionAttribType.GetConstructor(new Type[] { typeof(string) }),
                         new object[] { options.TargetFrameworkName },
                         props,
                         propValues);
@@ -1673,13 +1547,13 @@ namespace ProtoBuf.Meta
 
             // copy assembly:InternalsVisibleTo
             Type internalsVisibleToAttribType = null;
-#if !FX11
+
             try
             {
-                internalsVisibleToAttribType = MapType(typeof(System.Runtime.CompilerServices.InternalsVisibleToAttribute));
+                internalsVisibleToAttribType = typeof(System.Runtime.CompilerServices.InternalsVisibleToAttribute);
             }
             catch { /* best endeavors only */ }
-#endif
+
             if (internalsVisibleToAttribType != null)
             {
                 BasicList internalAssemblies = new BasicList(), consideredAssemblies = new BasicList();
@@ -1692,19 +1566,17 @@ namespace ProtoBuf.Meta
                     AttributeMap[] assemblyAttribsMap = AttributeMap.Create(this, assembly);
                     for (int i = 0; i < assemblyAttribsMap.Length; i++)
                     {
-
                         if (assemblyAttribsMap[i].AttributeType != internalsVisibleToAttribType) continue;
 
-                        object privelegedAssemblyObj;
-                        assemblyAttribsMap[i].TryGet("AssemblyName", out privelegedAssemblyObj);
+                        assemblyAttribsMap[i].TryGet("AssemblyName", out var privelegedAssemblyObj);
                         string privelegedAssemblyName = privelegedAssemblyObj as string;
-                        if (privelegedAssemblyName == assemblyName || Helpers.IsNullOrEmpty(privelegedAssemblyName)) continue; // ignore
+                        if (privelegedAssemblyName == assemblyName || string.IsNullOrEmpty(privelegedAssemblyName)) continue; // ignore
 
                         if (internalAssemblies.IndexOfString(privelegedAssemblyName) >= 0) continue; // seen it before
                         internalAssemblies.Add(privelegedAssemblyName);
 
                         CustomAttributeBuilder builder = new CustomAttributeBuilder(
-                            internalsVisibleToAttribType.GetConstructor(new Type[] { MapType(typeof(string)) }),
+                            internalsVisibleToAttribType.GetConstructor(new Type[] { typeof(string) }),
                             new object[] { privelegedAssemblyName });
                         asm.SetCustomAttribute(builder);
                     }
@@ -1712,20 +1584,21 @@ namespace ProtoBuf.Meta
             }
         }
 
-        private static MethodBuilder EmitBoxedSerializer(TypeBuilder type, int i, Type valueType, SerializerPair[] methodPairs, TypeModel model, Compiler.CompilerContext.ILVersion ilVersion, string assemblyName)
+        private static MethodBuilder EmitBoxedDeserializer(TypeBuilder type, int i, Type valueType, SerializerPair[] methodPairs, TypeModel model, Compiler.CompilerContext.ILVersion ilVersion, string assemblyName)
         {
             MethodInfo dedicated = methodPairs[i].Deserialize;
             MethodBuilder boxedSerializer = type.DefineMethod("_" + i.ToString(), MethodAttributes.Static, CallingConventions.Standard,
-                model.MapType(typeof(object)), new Type[] { model.MapType(typeof(object)), model.MapType(typeof(ProtoReader)) });
-            Compiler.CompilerContext ctx = new Compiler.CompilerContext(boxedSerializer.GetILGenerator(), true, false, methodPairs, model, ilVersion, assemblyName, model.MapType(typeof(object)), "BoxedSerializer "  + valueType.Name);
+                typeof(object),
+                new Type[] { typeof(ProtoReader), ProtoReader.State.ByRefStateType, typeof(object) });
+            Compiler.CompilerContext ctx = new Compiler.CompilerContext(boxedSerializer.GetILGenerator(), true, false, methodPairs, model, ilVersion, assemblyName, typeof(object), "BoxedSerializer " + valueType.Name);
             ctx.LoadValue(ctx.InputValue);
             Compiler.CodeLabel @null = ctx.DefineLabel();
             ctx.BranchIfFalse(@null, true);
 
             Type mappedValueType = valueType;
+            ctx.LoadReader(true);
             ctx.LoadValue(ctx.InputValue);
             ctx.CastFromObject(mappedValueType);
-            ctx.LoadReaderWriter();
             ctx.EmitCall(dedicated);
             ctx.CastToObject(mappedValueType);
             ctx.Return();
@@ -1736,24 +1609,23 @@ namespace ProtoBuf.Meta
                 // create a new valueType
                 ctx.LoadAddress(typedVal, mappedValueType);
                 ctx.EmitCtor(mappedValueType);
+                ctx.LoadReader(true);
                 ctx.LoadValue(typedVal);
-                ctx.LoadReaderWriter();
                 ctx.EmitCall(dedicated);
                 ctx.CastToObject(mappedValueType);
                 ctx.Return();
             }
             return boxedSerializer;
         }
-        
-#endif
-#endif
-            //internal bool IsDefined(Type type, int fieldNumber)
-            //{
-            //    return FindWithoutAdd(type).IsDefined(fieldNumber);
-            //}
 
-            // note that this is used by some of the unit tests
-            internal bool IsPrepared(Type type)
+#endif
+        //internal bool IsDefined(Type type, int fieldNumber)
+        //{
+        //    return FindWithoutAdd(type).IsDefined(fieldNumber);
+        //}
+
+        // note that this is used by some of the unit tests
+        internal bool IsPrepared(Type type)
         {
             MetaType meta = FindWithoutAdd(type);
             return meta != null && meta.IsPrepared();
@@ -1780,7 +1652,7 @@ namespace ProtoBuf.Meta
         }
 
 #if DEBUG
-        int lockCount;
+        private int lockCount;
         /// <summary>
         /// Gets how many times a model lock was taken
         /// </summary>
@@ -1814,11 +1686,8 @@ namespace ProtoBuf.Meta
             else
             {
                 AddContention();
-#if FX11
-                throw new InvalidOperationException(message);
-#else
+
                 throw new TimeoutException(message);
-#endif
             }
 #endif
 
@@ -1859,7 +1728,7 @@ namespace ProtoBuf.Meta
             if (opaqueToken != 0)
             {
                 Monitor.Exit(types);
-                if(opaqueToken != GetContention()) // contention-count changes since we looked!
+                if (opaqueToken != GetContention()) // contention-count changes since we looked!
                 {
                     LockContentedEventHandler handler = LockContended;
                     if (handler != null)
@@ -1870,26 +1739,29 @@ namespace ProtoBuf.Meta
                         {
                             throw new ProtoException();
                         }
-                        catch(Exception ex)
+                        catch (Exception ex)
                         {
                             stackTrace = ex.StackTrace;
                         }
-                        
+
                         handler(this, new LockContentedEventArgs(stackTrace));
                     }
                 }
             }
         }
+
+#pragma warning disable RCS1159 // Use EventHandler<T>.
         /// <summary>
         /// If a lock-contention is detected, this event signals the *owner* of the lock responsible for the blockage, indicating
         /// what caused the problem; this is only raised if the lock-owning code successfully completes.
         /// </summary>
         public event LockContentedEventHandler LockContended;
+#pragma warning restore RCS1159 // Use EventHandler<T>.
 
         internal void ResolveListTypes(Type type, ref Type itemType, ref Type defaultType)
         {
             if (type == null) return;
-            if(Helpers.GetTypeCode(type) != ProtoTypeCode.Unknown) return; // don't try this[type] for inbuilts
+            if (Helpers.GetTypeCode(type) != ProtoTypeCode.Unknown) return; // don't try this[type] for inbuilts
 
             // handle arrays
             if (type.IsArray)
@@ -1899,7 +1771,7 @@ namespace ProtoBuf.Meta
                     throw new NotSupportedException("Multi-dimension arrays are supported");
                 }
                 itemType = type.GetElementType();
-                if (itemType == MapType(typeof(byte)))
+                if (itemType == typeof(byte))
                 {
                     defaultType = itemType = null;
                 }
@@ -1915,7 +1787,7 @@ namespace ProtoBuf.Meta
             }
 
             // handle lists 
-            if (itemType == null) { itemType = TypeModel.GetListItemType(this, type); }
+            if (itemType == null) { itemType = TypeModel.GetListItemType(type); }
 
             // check for nested data (not allowed)
             if (itemType != null)
@@ -1930,8 +1802,8 @@ namespace ProtoBuf.Meta
 
             if (itemType != null && defaultType == null)
             {
-#if WINRT || COREFX
-                System.Reflection.TypeInfo typeInfo = System.Reflection.IntrospectionExtensions.GetTypeInfo(type);
+#if COREFX || PROFILE259
+				TypeInfo typeInfo = type.GetTypeInfo();
                 if (typeInfo.IsClass && !typeInfo.IsAbstract && Helpers.GetConstructor(typeInfo, Helpers.EmptyTypes, true) != null)
 #else
                 if (type.IsClass && !type.IsAbstract && Helpers.GetConstructor(type, Helpers.EmptyTypes, true) != null)
@@ -1941,31 +1813,27 @@ namespace ProtoBuf.Meta
                 }
                 if (defaultType == null)
                 {
-#if WINRT || COREFX
-                    if (typeInfo.IsInterface)
+#if COREFX || PROFILE259
+					if (typeInfo.IsInterface)
 #else
                     if (type.IsInterface)
 #endif
                     {
-#if NO_GENERICS
-                        defaultType = typeof(ArrayList);
-#else
                         Type[] genArgs;
-#if WINRT || COREFX
+#if COREFX || PROFILE259
                         if (typeInfo.IsGenericType && typeInfo.GetGenericTypeDefinition() == typeof(System.Collections.Generic.IDictionary<,>)
                             && itemType == typeof(System.Collections.Generic.KeyValuePair<,>).MakeGenericType(genArgs = typeInfo.GenericTypeArguments))
 #else
-                        if (type.IsGenericType && type.GetGenericTypeDefinition() == MapType(typeof(System.Collections.Generic.IDictionary<,>))
-                            && itemType == MapType(typeof(System.Collections.Generic.KeyValuePair<,>)).MakeGenericType(genArgs = type.GetGenericArguments()))
+                        if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(System.Collections.Generic.IDictionary<,>)
+                            && itemType == typeof(System.Collections.Generic.KeyValuePair<,>).MakeGenericType(genArgs = type.GetGenericArguments()))
 #endif
                         {
-                            defaultType = MapType(typeof(System.Collections.Generic.Dictionary<,>)).MakeGenericType(genArgs);
+                            defaultType = typeof(System.Collections.Generic.Dictionary<,>).MakeGenericType(genArgs);
                         }
                         else
                         {
-                            defaultType = MapType(typeof(System.Collections.Generic.List<>)).MakeGenericType(itemType);
+                            defaultType = typeof(System.Collections.Generic.List<>).MakeGenericType(itemType);
                         }
-#endif
                     }
                 }
                 // verify that the default type is appropriate
@@ -1973,28 +1841,14 @@ namespace ProtoBuf.Meta
             }
         }
 
-      
-#if FEAT_IKVM
-        internal override Type GetType(string fullName, Assembly context)
-        {
-            if (context != null)
-            {
-                Type found = universe.GetType(context, fullName, false);
-                if (found != null) return found;
-            }
-            return universe.GetType(fullName, false);
-        }
-#endif
-
         internal string GetSchemaTypeName(Type effectiveType, DataFormat dataFormat, bool asReference, bool dynamicType, ref CommonImports imports)
         {
             Type tmp = Helpers.GetUnderlyingType(effectiveType);
             if (tmp != null) effectiveType = tmp;
 
-            if (effectiveType == this.MapType(typeof(byte[]))) return "bytes";
+            if (effectiveType == typeof(byte[])) return "bytes";
 
-            WireType wireType;
-            IProtoSerializer ser = ValueMember.TryGetCoreSerializer(this, dataFormat, effectiveType, out wireType, false, false, false, false);
+            IProtoSerializer ser = ValueMember.TryGetCoreSerializer(this, dataFormat, effectiveType, out var wireType, false, false, false, false);
             if (ser == null)
             {   // model type
                 if (asReference || dynamicType)
@@ -2063,7 +1917,7 @@ namespace ProtoBuf.Meta
                                 return ".bcl.DateTime";
                         }
                     case ProtoTypeCode.TimeSpan:
-                        switch(dataFormat)
+                        switch (dataFormat)
                         {
                             case DataFormat.FixedSize: return "sint64";
                             case DataFormat.WellKnown:
@@ -2079,7 +1933,6 @@ namespace ProtoBuf.Meta
                     default: throw new NotSupportedException("No .proto map found for: " + effectiveType.FullName);
                 }
             }
-
         }
 
         /// <summary>
@@ -2097,34 +1950,32 @@ namespace ProtoBuf.Meta
             if (factory != null)
             {
                 if (type != null && Helpers.IsValueType(type)) throw new InvalidOperationException();
-                if (!factory.IsStatic) throw new ArgumentException("A factory-method must be static", "factory");
-                if ((type != null && factory.ReturnType != type) && factory.ReturnType != MapType(typeof(object))) throw new ArgumentException("The factory-method must return object" + (type == null ? "" : (" or " + type.FullName)), "factory");
+                if (!factory.IsStatic) throw new ArgumentException("A factory-method must be static", nameof(factory));
+                if (type != null && factory.ReturnType != type && factory.ReturnType != typeof(object)) throw new ArgumentException("The factory-method must return object" + (type == null ? "" : (" or " + type.FullName)), nameof(factory));
 
-                if (!CallbackSet.CheckCallbackParameters(this, factory)) throw new ArgumentException("Invalid factory signature in " + factory.DeclaringType.FullName + "." + factory.Name, "factory");
+                if (!CallbackSet.CheckCallbackParameters(factory)) throw new ArgumentException("Invalid factory signature in " + factory.DeclaringType.FullName + "." + factory.Name, nameof(factory));
             }
         }
-
     }
+
     /// <summary>
     /// Contains the stack-trace of the owning code when a lock-contention scenario is detected
     /// </summary>
     public sealed class LockContentedEventArgs : EventArgs
     {
-        private readonly string ownerStackTrace;
         internal LockContentedEventArgs(string ownerStackTrace)
         {
-            this.ownerStackTrace = ownerStackTrace;
+            OwnerStackTrace = ownerStackTrace;
         }
+
         /// <summary>
         /// The stack-trace of the code that owned the lock when a lock-contention scenario occurred
         /// </summary>
-        public string OwnerStackTrace { get { return ownerStackTrace; } }
+        public string OwnerStackTrace { get; }
     }
     /// <summary>
     /// Event-type that is raised when a lock-contention scenario is detected
     /// </summary>
     public delegate void LockContentedEventHandler(object sender, LockContentedEventArgs args);
-
-
 }
 #endif

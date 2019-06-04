@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -13,14 +14,14 @@ namespace Google.Protobuf.Reflection
 {
 #pragma warning disable CS1591
 
-    interface IType
+    internal interface IType
     {
         IType Parent { get; }
         string FullyQualifiedName { get; }
 
         IType Find(string name);
     }
-    partial class FileDescriptorSet
+    public partial class FileDescriptorSet
     {
         internal const string Namespace = ".google.protobuf.";
         public Func<string, bool> ImportValidator { get; set; }
@@ -33,26 +34,35 @@ namespace Google.Protobuf.Reflection
         public Error[] GetErrors() => Error.GetArray(Errors);
         internal List<Error> Errors { get; } = new List<Error>();
 
+        /// <summary>
+        /// When processing Foo/Bar/Some.proto, should Foo/Bar be treated as an implicit import location?
+        /// </summary>
+        public bool AllowNameOnlyImport { get; set; }
+
         public bool Add(string name, bool includeInOutput, TextReader source = null)
+            => Add(name, includeInOutput, source, null);
+        internal bool Add(string name, bool includeInOutput, TextReader source, FileDescriptorProto fromFile)
         {
             if (string.IsNullOrWhiteSpace(name))
                 throw new ArgumentNullException(nameof(name));
             if (Path.IsPathRooted(name) || name.Contains(".."))
                 throw new ArgumentException("Paths should be relative to the import paths, not rooted", nameof(name));
-            if (TryResolve(name, out var descriptor))
+
+            if (TryResolve(name, fromFile, out var descriptor))
             {
                 if (includeInOutput) descriptor.IncludeInOutput = true;
                 return true; // already exists, that counts as success
             }
-
-            using (var reader = source ?? Open(name))
+            string path = null;
+            using (var reader = source ?? Open(name, out path))
             {
                 if (reader == null) return false; // not found
 
                 descriptor = new FileDescriptorProto
                 {
                     Name = name,
-                    IncludeInOutput = includeInOutput
+                    IncludeInOutput = includeInOutput,
+                    DefaultPackage = GetDefaultPackageName(path),
                 };
                 Files.Add(descriptor);
 
@@ -60,26 +70,76 @@ namespace Google.Protobuf.Reflection
                 return true;
             }
         }
-
-        private TextReader Open(string name)
+        /// <summary>
+        /// Default package to use when none is specified; can use #FILE# and #DIR# tokens
+        /// </summary>
+        public string DefaultPackage { get; set; }
+        private string GetDefaultPackageName(string path)
         {
-            var found = FindFile(name);
-            if (found == null) return null;
+            if (string.IsNullOrWhiteSpace(DefaultPackage)) return null;
+
+            if (DefaultPackage.IndexOf('#') < 0) return DefaultPackage;
+
+            var file = Path.GetFileNameWithoutExtension(path)?.Replace(' ', '_');
+            var dir = Path.GetFileName(Path.GetDirectoryName(path))?.Replace(' ', '_');
+
+            return DefaultPackage.Replace("#FILE#", file).Replace("#DIR#", dir);
+        }
+
+        private TextReader Open(string name, out string found)
+        {
+            found = FindFile(name);
+            if (found == null)
+            {
+                var embedded = TryGetEmbedded(name);
+                if (embedded != null)
+                    return new StreamReader(embedded);
+                return null;
+            }
             return File.OpenText(found);
         }
-        string FindFile(string file)
+        private static Stream TryGetEmbedded(string name)
         {
+            if (string.IsNullOrWhiteSpace(name) || !name.EndsWith(".proto")) return null;
+
+            if (name.StartsWith("google/")
+                || name.StartsWith("protobuf-net/"))
+            {
+                var resourceName = "ProtoBuf." + name.Replace('/', '.').Replace('-', '_');
+                try
+                {
+                    return typeof(FileDescriptorSet)
+#if NETSTANDARD1_3
+                    .GetTypeInfo()
+#endif
+                    .Assembly.GetManifestResourceStream(resourceName);
+                } catch { }
+            }
+            return null;
+        }
+        private string FindFile(string file)
+        {
+            string rel;
             foreach (var path in importPaths)
             {
-                var rel = Path.Combine(path, file);
+                rel = Path.Combine(path, file);
                 if (File.Exists(rel)) return rel;
             }
             return null;
         }
-
-        bool TryResolve(string name, out FileDescriptorProto descriptor)
+        private bool TryResolve(string name, FileDescriptorProto from, out FileDescriptorProto descriptor)
         {
-            descriptor = Files.FirstOrDefault(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase));
+            descriptor = Files.Find(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase));
+
+            if (descriptor == null && from != null && AllowNameOnlyImport && Path.GetFileName(name) == name) // only if no folder specified
+            {
+                try
+                {
+                    var inSameFolder = Path.Combine(Path.GetDirectoryName(from.Name), name);
+                    descriptor = Files.Find(x => string.Equals(x.Name, inSameFolder, StringComparison.OrdinalIgnoreCase));
+                }
+                catch { } // ignore
+            }
             return descriptor != null;
         }
 
@@ -89,7 +149,7 @@ namespace Google.Protobuf.Reflection
             do
             {
                 didSomething = false;
-                var file = Files.FirstOrDefault(x => x.HasPendingImports);
+                var file = Files.Find(x => x.HasPendingImports);
                 if (file != null)
                 {
                     // note that GetImports clears the flag
@@ -97,15 +157,15 @@ namespace Google.Protobuf.Reflection
                     {
                         if (!(ImportValidator?.Invoke(import.Path) ?? true))
                         {
-                            Errors.Error(import.Token, $"import of {import.Path} is disallowed");
+                            Errors.Error(import.Token, $"import of {import.Path} is disallowed", ErrorCode.ImportNotPermitted);
                         }
-                        else if (Add(import.Path, false))
+                        else if (Add(import.Path, false, null, file))
                         {
                             didSomething = true;
                         }
                         else
                         {
-                            Errors.Error(import.Token, $"unable to find: '{import.Path}'");
+                            Errors.Error(import.Token, $"unable to find: '{import.Path}'", ErrorCode.ImportNotFound);
                         }
                     }
                 }
@@ -119,7 +179,7 @@ namespace Google.Protobuf.Reflection
             {
                 using (var ctx = new ParserContext(file, null, Errors))
                 {
-                    file.BuildTypeHierarchy(this, ctx);
+                    file.BuildTypeHierarchy(this);
                 }
             }
             foreach (var file in Files)
@@ -161,11 +221,10 @@ namespace Google.Protobuf.Reflection
             Serialize((s,o) => { Serializer.Serialize((Stream)o, s); return true; }, includeImports, destination);
         }
 
-        internal FileDescriptorProto GetFile(string path)
-            // try full match first, then name-only match
-            => Files.FirstOrDefault(x => string.Equals(x.Name, path, StringComparison.OrdinalIgnoreCase));
+        internal FileDescriptorProto GetFile(FileDescriptorProto from, string path)
+            => TryResolve(path, from, out var descriptor) ? descriptor : null;
     }
-    partial class DescriptorProto : ISchemaObject, IType, IMessage
+    public partial class DescriptorProto : ISchemaObject, IType, IMessage
     {
         public static byte[] GetExtensionData(IExtensible obj)
         {
@@ -175,7 +234,7 @@ namespace Google.Protobuf.Reflection
             var s = ext.BeginQuery();
             try
             {
-                if (s is MemoryStream) return ((MemoryStream)s).ToArray();
+                if (s is MemoryStream ms) return (ms).ToArray();
 
                 byte[] buffer = new byte[len];
                 int offset = 0, read;
@@ -216,8 +275,8 @@ namespace Google.Protobuf.Reflection
         string IType.FullyQualifiedName => FullyQualifiedName;
         IType IType.Find(string name)
         {
-            return (IType)NestedTypes.FirstOrDefault(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase))
-                ?? (IType)EnumTypes.FirstOrDefault(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase));
+            return (IType)NestedTypes.Find(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase))
+                ?? (IType)EnumTypes.Find(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase));
         }
         internal string FullyQualifiedName { get; set; }
 
@@ -225,8 +284,6 @@ namespace Google.Protobuf.Reflection
 
         internal int MaxField => (Options?.MessageSetWireFormat == true) ? int.MaxValue : FieldDescriptorProto.DefaultMaxField;
         int IMessage.MaxField => MaxField;
-
-
         internal static bool TryParse(ParserContext ctx, IHazNames parent, out DescriptorProto obj)
         {
             var name = ctx.Tokens.Consume(TokenType.AlphaNumeric);
@@ -283,8 +340,6 @@ namespace Google.Protobuf.Reflection
                     Fields.Add(obj);
             }
         }
-
-
         private void ParseMap(ParserContext ctx)
         {
             ctx.AbortState = AbortState.Statement;
@@ -304,7 +359,7 @@ namespace Google.Protobuf.Reflection
                 case FieldDescriptorProto.Type.TypeGroup:
                 case FieldDescriptorProto.Type.TypeFloat:
                 case FieldDescriptorProto.Type.TypeDouble:
-                    ctx.Errors.Error(tokens.Previous, "invalid map key type (only integral and string types are allowed)");
+                    ctx.Errors.Error(tokens.Previous, "invalid map key type (only integral and string types are allowed)", ErrorCode.InvalidMapKeyType);
                     break;
             }
             tokens.Consume(TokenType.Symbol, ",");
@@ -406,13 +461,11 @@ namespace Google.Protobuf.Reflection
                 }
                 else
                 {
-                    tokens.Read().Throw("unable to parse extension range");
+                    tokens.Read().Throw(ErrorCode.ParseFailExtensionRange, "unable to parse extension range");
                 }
             }
             ctx.AbortState = AbortState.None;
         }
-
-
 
         private void ParseReservedRanges(ParserContext ctx)
         {
@@ -425,10 +478,10 @@ namespace Google.Protobuf.Reflection
                     while (true)
                     {
                         var name = tokens.Consume(TokenType.StringLiteral);
-                        var conflict = Fields.FirstOrDefault(x => x.Name == name);
+                        var conflict = Fields.Find(x => x.Name == name);
                         if (conflict != null)
                         {
-                            ctx.Errors.Error(tokens.Previous, $"'{conflict.Name}' is already in use by field {conflict.Number}");
+                            ctx.Errors.Error(tokens.Previous, $"'{conflict.Name}' is already in use by field {conflict.Number}", ErrorCode.FieldDuplicatedNumber);
                         }
                         ReservedNames.Add(name);
 
@@ -441,7 +494,7 @@ namespace Google.Protobuf.Reflection
                         }
                         else
                         {
-                            tokens.Read().Throw("unable to parse reserved range");
+                            tokens.Read().Throw(ErrorCode.ParseFailReservedRange, "unable to parse reserved range");
                         }
                     }
                     break;
@@ -454,10 +507,11 @@ namespace Google.Protobuf.Reflection
                             tokens.Consume();
                             to = tokens.ConsumeInt32();
                         }
-                        var conflict = Fields.FirstOrDefault(x => x.Number >= from && x.Number <= to);
+                        var conflict = Fields.Find(x => x.Number >= from && x.Number <= to);
                         if (conflict != null)
                         {
-                            ctx.Errors.Error(tokens.Previous, $"field {conflict.Number} is already in use by '{conflict.Name}'");
+                            ctx.Errors.Error(tokens.Previous, $"field {conflict.Number} is already in use by '{conflict.Name}'", ErrorCode.FieldDuplicatedNumber
+                                );
                         }
                         ReservedRanges.Add(new ReservedRange { Start = from, End = to + 1 });
 
@@ -473,12 +527,12 @@ namespace Google.Protobuf.Reflection
                         }
                         else
                         {
-                            token.Throw();
+                            token.Throw(ErrorCode.ParseFailReservedRange);
                         }
                     }
                     break;
                 default:
-                    throw token.Throw();
+                    throw token.Throw(ErrorCode.ParseFailReservedRange);
             }
             ctx.AbortState = AbortState.None;
         }
@@ -492,7 +546,7 @@ namespace Google.Protobuf.Reflection
         }
     }
 
-    partial class OneofDescriptorProto : ISchemaObject
+    public partial class OneofDescriptorProto : ISchemaObject
     {
         internal DescriptorProto Parent { get; set; }
         internal static void Parse(ParserContext ctx, DescriptorProto parent)
@@ -521,13 +575,13 @@ namespace Google.Protobuf.Reflection
             {
                 if (FieldDescriptorProto.TryParse(ctx, Parent, true, out var field))
                 {
-                    field.OneofIndex = Parent.OneofDecls.Count() - 1;
+                    field.OneofIndex = Parent.OneofDecls.Count - 1;
                     Parent.Fields.Add(field);
                 }
             }
         }
     }
-    partial class OneofOptions : ISchemaOptions
+    public partial class OneofOptions : ISchemaOptions
     {
         string ISchemaOptions.Extendee => FileDescriptorSet.Namespace + nameof(OneofOptions);
         public byte[] ExtensionData
@@ -538,13 +592,13 @@ namespace Google.Protobuf.Reflection
         bool ISchemaOptions.Deprecated { get { return false; } set { } }
         bool ISchemaOptions.ReadOne(ParserContext ctx, string key) => false;
     }
-    partial class FileDescriptorProto : ISchemaObject, IMessage, IType
+    public partial class FileDescriptorProto : ISchemaObject, IMessage, IType
     {
         internal static FileDescriptorProto GetFile(IType type)
         {
             while (type != null)
             {
-                if (type is FileDescriptorProto) return (FileDescriptorProto)type;
+                if (type is FileDescriptorProto file) return file;
                 type = type.Parent;
             }
             return null;
@@ -560,14 +614,14 @@ namespace Google.Protobuf.Reflection
         IType IType.Parent => null;
         IType IType.Find(string name)
         {
-            return (IType)MessageTypes.FirstOrDefault(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase))
-                ?? (IType)EnumTypes.FirstOrDefault(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase));
+            return (IType)MessageTypes.Find(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase))
+                ?? (IType)EnumTypes.Find(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase));
         }
         internal bool HasPendingImports { get; private set; }
         internal FileDescriptorSet Parent { get; private set; }
 
         internal bool IncludeInOutput { get; set; }
-
+        internal string DefaultPackage { get; set; }
         public bool HasImports() => _imports.Count != 0;
         internal IEnumerable<Import> GetImports(bool resetPendingFlag = false)
         {
@@ -577,10 +631,10 @@ namespace Google.Protobuf.Reflection
             }
             return _imports;
         }
-        readonly List<Import> _imports = new List<Import>();
+        private readonly List<Import> _imports = new List<Import>();
         internal bool AddImport(string path, bool isPublic, Token token)
         {
-            var existing = _imports.FirstOrDefault(x => string.Equals(x.Path, path, StringComparison.OrdinalIgnoreCase));
+            var existing = _imports.Find(x => string.Equals(x.Path, path, StringComparison.OrdinalIgnoreCase));
             if (existing != null)
             {
                 // we'll allow this to upgrade
@@ -624,19 +678,17 @@ namespace Google.Protobuf.Reflection
 
                 if (!AddImport(path, isPublic, tokens.Previous))
                 {
-                    ctx.Errors.Warn(tokens.Previous, $"duplicate import: '{path}'");
+                    ctx.Errors.Warn(tokens.Previous, $"duplicate import: '{path}'", ErrorCode.ImportDuplicated);
                 }
                 tokens.Consume(TokenType.Symbol, ";");
                 ctx.AbortState = AbortState.None;
-
-
             }
             else if (tokens.ConsumeIf(TokenType.AlphaNumeric, "syntax"))
             {
                 ctx.AbortState = AbortState.Statement;
-                if (MessageTypes.Any() || EnumTypes.Any() || Extensions.Any())
+                if (MessageTypes.Count > 0 || EnumTypes.Count > 0 || Extensions.Count > 0)
                 {
-                    ctx.Errors.Error(tokens.Previous, "syntax must be set before types are defined");
+                    ctx.Errors.Error(tokens.Previous, "syntax must be set before types are defined", ErrorCode.ProtoSyntaxPreceedTypes);
                 }
                 tokens.Consume(TokenType.Symbol, "=");
                 Syntax = tokens.Consume(TokenType.StringLiteral);
@@ -646,7 +698,7 @@ namespace Google.Protobuf.Reflection
                     case SyntaxProto3:
                         break;
                     default:
-                        ctx.Errors.Error(tokens.Previous, $"unknown syntax '{Syntax}'");
+                        ctx.Errors.Error(tokens.Previous, $"unknown syntax '{Syntax}'", ErrorCode.ProtoSyntaxInvalid);
                         break;
                 }
                 tokens.Consume(TokenType.Symbol, ";");
@@ -664,7 +716,7 @@ namespace Google.Protobuf.Reflection
             }
             else if (tokens.Peek(out var token))
             {
-                token.Throw();
+                token.Throw(ErrorCode.SyntaxErrorUnknownEntity);
             } // else EOF
         }
 
@@ -682,16 +734,16 @@ namespace Google.Protobuf.Reflection
                 // finish up
                 if (string.IsNullOrWhiteSpace(Syntax))
                 {
-                    ctx.Errors.Warn(startOfFile, "no syntax specified; it is strongly recommended to specify 'syntax=\"proto2\";' or 'syntax=\"proto3\";'");
+                    ctx.Errors.Warn(startOfFile, "no syntax specified; it is strongly recommended to specify 'syntax=\"proto2\";' or 'syntax=\"proto3\";'", ErrorCode.ProtoSyntaxNotSpecified);
                 }
+#pragma warning disable RCS1156 // Use string.Length instead of comparison with empty string.
                 if (Syntax == "" || Syntax == SyntaxProto2)
+#pragma warning restore RCS1156 // Use string.Length instead of comparison with empty string.
                 {
                     Syntax = null; // for output compatibility; is blank even if set to proto2 explicitly
                 }
             }
         }
-
-
         internal bool TryResolveEnum(string typeName, IType parent, out EnumDescriptorProto @enum, bool allowImports, bool treatAllAsPublic = false)
         {
             if (TryResolveType(typeName, parent, out var type, allowImports, true, treatAllAsPublic))
@@ -786,7 +838,7 @@ namespace Google.Protobuf.Reflection
             {
                 foreach (var import in _imports)
                 {
-                    var file = Parent?.GetFile(import.Path);
+                    var file = Parent?.GetFile(this, import.Path);
                     if (file != null)
                     {
                         if (TryResolveFromFile(file, extendee, extension, out field, true, import.IsPublic))
@@ -798,7 +850,7 @@ namespace Google.Protobuf.Reflection
                 }
                 foreach (var import in _imports)
                 {
-                    var file = Parent?.GetFile(import.Path);
+                    var file = Parent?.GetFile(this, import.Path);
                     if (file != null)
                     {
                         if (TryResolveFromFile(file, extendee, extension, out field, false, import.IsPublic))
@@ -822,14 +874,20 @@ namespace Google.Protobuf.Reflection
                 if (withPackageName)
                 {
                     var pkg = file.Package;
-                    if (string.IsNullOrWhiteSpace(pkg)) return false; // we're only looking *with* packages right now
 
-                    if (!tn.StartsWith(pkg + ".")) return false; // wrong file
+                    if(string.IsNullOrWhiteSpace(pkg))
+                    {
+                        // no package; anything could be fine
+                    }
+                    else
+                    {
+                        if (!tn.StartsWith(pkg + ".")) return false; // wrong file
 
-                    tn = tn.Substring(pkg.Length + 1); // and fully qualified (non-qualified is a second pass)
+                        tn = tn.Substring(pkg.Length + 1); // and fully qualified (non-qualified is a second pass)
+                    }
                 }
 
-                return file.TryResolveType(tn, file, out tp, ai, false, treatAllAsPublic);
+                return file.TryResolveType(tn, file, out tp, ai, false, taap);
             }
 
             bool isRooted = typeName.StartsWith(".");
@@ -871,7 +929,7 @@ namespace Google.Protobuf.Reflection
             {
                 if (allowImports || import.IsPublic || treatAllAsPublic)
                 {
-                    var file = Parent?.GetFile(import.Path);
+                    var file = Parent?.GetFile(this, import.Path);
                     if (TryResolveFromFile(file, typeName, false, out type, true, treatAllAsPublic))
                     {
                         import.Used = true;
@@ -885,7 +943,7 @@ namespace Google.Protobuf.Reflection
             {
                 if (allowImports || import.IsPublic || treatAllAsPublic)
                 {
-                    var file = Parent?.GetFile(import.Path);
+                    var file = Parent?.GetFile(this, import.Path);
                     if (TryResolveFromFile(file, typeName, false, out type, false, treatAllAsPublic))
                     {
                         import.Used = true;
@@ -896,10 +954,9 @@ namespace Google.Protobuf.Reflection
 
             type = null;
             return false;
-
         }
 
-        static void SetParents(string prefix, EnumDescriptorProto parent)
+        private static void SetParents(string prefix, EnumDescriptorProto parent)
         {
             parent.FullyQualifiedName = prefix + "." + parent.Name;
             foreach (var val in parent.Values)
@@ -907,7 +964,7 @@ namespace Google.Protobuf.Reflection
                 val.Parent = parent;
             }
         }
-        static void SetParents(string prefix, DescriptorProto parent)
+        private static void SetParents(string prefix, DescriptorProto parent)
         {
             var fqn = parent.FullyQualifiedName = prefix + "." + parent.Name;
             foreach (var field in parent.Fields)
@@ -929,7 +986,7 @@ namespace Google.Protobuf.Reflection
                 ext.Parent = parent;
             }
         }
-        internal void BuildTypeHierarchy(FileDescriptorSet set, ParserContext ctx)
+        internal void BuildTypeHierarchy(FileDescriptorSet set)
         {
             // build the tree starting at the root
             Parent = set;
@@ -950,7 +1007,7 @@ namespace Google.Protobuf.Reflection
             }
         }
 
-        static bool ShouldResolveType(FieldDescriptorProto.Type type)
+        private static bool ShouldResolveType(FieldDescriptorProto.Type type)
         {
             switch (type)
             {
@@ -967,7 +1024,10 @@ namespace Google.Protobuf.Reflection
         {
             foreach (var field in fields)
             {
-                if (options) ResolveOptions(ctx, field.Options);
+                if (options)
+                {
+                    ResolveOptions(ctx, field.Options);
+                }
                 else
                 {
                     if (!string.IsNullOrEmpty(field.TypeName) && ShouldResolveType(field.type))
@@ -988,7 +1048,7 @@ namespace Google.Protobuf.Reflection
                             if (!string.IsNullOrWhiteSpace(field.DefaultValue)
                                 & !@enum.Values.Any(x => x.Name == field.DefaultValue))
                             {
-                                ctx.Errors.Error(field.TypeToken, $"enum {@enum.Name} does not contain value '{field.DefaultValue}'");
+                                ctx.Errors.Error(field.TypeToken, $"enum {@enum.Name} does not contain value '{field.DefaultValue}'", ErrorCode.EnumValueNotFound);
                             }
                             fqn = @enum?.FullyQualifiedName;
                         }
@@ -1021,7 +1081,7 @@ namespace Google.Protobuf.Reflection
                         bool canPack = FieldDescriptorProto.CanPack(field.type);
                         if (!canPack)
                         {
-                            ctx.Errors.Error(field.TypeToken, $"field of type {field.type} cannot be packed");
+                            ctx.Errors.Error(field.TypeToken, $"field of type {field.type} cannot be packed", ErrorCode.PackedFieldInvalidType);
                             field.Options.Packed = false;
                         }
                     }
@@ -1032,9 +1092,13 @@ namespace Google.Protobuf.Reflection
         private void ResolveTypes(ParserContext ctx, ServiceDescriptorProto service, bool options)
         {
             if (options) ResolveOptions(ctx, service.Options);
+
             foreach (var method in service.Methods)
             {
-                if (options) ResolveOptions(ctx, method.Options);
+                if (options)
+                {
+                    ResolveOptions(ctx, method.Options);
+                }
                 else
                 {
                     if (!TryResolveMessage(method.InputType, this, out var msg, true))
@@ -1072,7 +1136,6 @@ namespace Google.Protobuf.Reflection
             }
         }
 
-
         IEnumerable<string> IHazNames.GetNames()
         {
             foreach (var type in MessageTypes) yield return type.Name;
@@ -1108,7 +1171,7 @@ namespace Google.Protobuf.Reflection
                     }
                     if (IncludeInOutput && !import.Used)
                     {
-                        ctx.Errors.Warn(import.Token, $"import not used: '{import.Path}'");
+                        ctx.Errors.Warn(import.Token, $"import not used: '{import.Path}'", ErrorCode.ImportNotUsed);
                     }
                 }
                 // note that Dependencies should stay in declaration order to be consistent with protoc
@@ -1141,14 +1204,15 @@ namespace Google.Protobuf.Reflection
             var target = extension.BeginAppend();
             try
             {
-                using (var writer = new ProtoWriter(target, null, null))
+                using (var writer = ProtoWriter.Create(out var state, target, null, null))
                 {
                     var hive = OptionHive.Build(options.UninterpretedOptions);
 
                     // first pass is used to sort the fields so we write them in the right order
-                    AppendOptions(this, writer, ctx, options.Extendee, hive.Children, true, 0, false);
+                    AppendOptions(this, writer, ref state, ctx, options.Extendee, hive.Children, true, 0, false);
                     // second pass applies the data
-                    AppendOptions(this, writer, ctx, options.Extendee, hive.Children, false, 0, false);
+                    AppendOptions(this, writer, ref state, ctx, options.Extendee, hive.Children, false, 0, false);
+                    writer.Close(ref state);
                 }
                 options.UninterpretedOptions.RemoveAll(x => x.Applied);
             }
@@ -1156,10 +1220,9 @@ namespace Google.Protobuf.Reflection
             {
                 extension.EndAppend(target, true);
             }
-
         }
 
-        class OptionHive
+        private class OptionHive
         {
             public OptionHive(string name, bool isExtension, Token token)
             {
@@ -1201,14 +1264,14 @@ namespace Google.Protobuf.Reflection
             {
                 if (options == null || options.Count == 0) return null;
 
-                var root = new OptionHive(null, false, default(Token));
+                var root = new OptionHive(null, false, default);
                 foreach (var option in options)
                 {
                     var level = root;
                     OptionHive nextLevel = null;
                     foreach (var name in option.Names)
                     {
-                        nextLevel = level.Children.FirstOrDefault(x => x.Name == name.name_part && x.IsExtension == name.IsExtension);
+                        nextLevel = level.Children.Find(x => x.Name == name.name_part && x.IsExtension == name.IsExtension);
                         if (nextLevel == null)
                         {
                             nextLevel = new OptionHive(name.name_part, name.IsExtension, name.Token);
@@ -1221,10 +1284,10 @@ namespace Google.Protobuf.Reflection
                 return root;
             }
         }
-        private static void AppendOptions(FileDescriptorProto file, ProtoWriter writer, ParserContext ctx, string extendee, List<OptionHive> options, bool resolveOnly, int depth, bool messageSet)
+        private static void AppendOptions(FileDescriptorProto file, ProtoWriter writer, ref ProtoWriter.State state, ParserContext ctx, string extendee, List<OptionHive> options, bool resolveOnly, int depth, bool messageSet)
         {
             foreach (var option in options)
-                AppendOption(file, writer, ctx, extendee, option, resolveOnly, depth, messageSet);
+                AppendOption(file, writer, ref state, ctx, extendee, option, resolveOnly, depth, messageSet);
 
             if (resolveOnly && depth != 0) // fun fact: proto writes root fields in *file* order, but sub-fields in *field* order
             {
@@ -1232,7 +1295,7 @@ namespace Google.Protobuf.Reflection
                 options.Sort((x, y) => (x.Field?.Number ?? 0).CompareTo(y.Field?.Number ?? 0));
             }
         }
-        private static void AppendOption(FileDescriptorProto file, ProtoWriter writer, ParserContext ctx, string extendee, OptionHive option, bool resolveOnly, int depth, bool messageSet)
+        private static void AppendOption(FileDescriptorProto file, ProtoWriter writer, ref ProtoWriter.State state, ParserContext ctx, string extendee, OptionHive option, bool resolveOnly, int depth, bool messageSet)
         {
             bool ShouldWrite(FieldDescriptorProto f, string v, string d)
                 => f.label != FieldDescriptorProto.Label.LabelOptional || v != (f.DefaultValue ?? d);
@@ -1249,7 +1312,7 @@ namespace Google.Protobuf.Reflection
             }
             else if (file.TryResolveMessage(extendee, null, out var msg, true))
             {
-                field = msg.Fields.FirstOrDefault(x => x.Name == option.Name);
+                field = msg.Fields.Find(x => x.Name == option.Name);
             }
             else
             {
@@ -1260,7 +1323,7 @@ namespace Google.Protobuf.Reflection
             {
                 if (!resolveOnly)
                 {
-                    ctx.Errors.Error(option.Token, $"unable to resolve custom option '{option.Name}' for '{extendee}'");
+                    ctx.Errors.Error(option.Token, $"unable to resolve custom option '{option.Name}' for '{extendee}'", ErrorCode.MissingCustomOption);
                 }
                 return;
             }
@@ -1278,33 +1341,33 @@ namespace Google.Protobuf.Reflection
                     {
                         if (resolveOnly)
                         {
-                            AppendOptions(nextFile, writer, ctx, field.TypeName, option.Children, resolveOnly, depth + 1, nextMessageSet);
+                            AppendOptions(nextFile, writer, ref state, ctx, field.TypeName, option.Children, resolveOnly, depth + 1, nextMessageSet);
                         }
                         else if (messageSet)
                         {
-                            ProtoWriter.WriteFieldHeader(1, WireType.StartGroup, writer);
-                            var grp = ProtoWriter.StartSubItem(null, writer);
+                            ProtoWriter.WriteFieldHeader(1, WireType.StartGroup, writer, ref state);
+                            var grp = ProtoWriter.StartSubItem(null, writer, ref state);
 
-                            ProtoWriter.WriteFieldHeader(2, WireType.Variant, writer);
-                            ProtoWriter.WriteInt32(field.Number, writer);
+                            ProtoWriter.WriteFieldHeader(2, WireType.Variant, writer, ref state);
+                            ProtoWriter.WriteInt32(field.Number, writer, ref state);
 
-                            ProtoWriter.WriteFieldHeader(3, WireType.String, writer);
-                            var payload = ProtoWriter.StartSubItem(null, writer);
+                            ProtoWriter.WriteFieldHeader(3, WireType.String, writer, ref state);
+                            var payload = ProtoWriter.StartSubItem(null, writer, ref state);
 
-                            AppendOptions(nextFile, writer, ctx, field.TypeName, option.Children, resolveOnly, depth + 1, nextMessageSet);
+                            AppendOptions(nextFile, writer, ref state, ctx, field.TypeName, option.Children, resolveOnly, depth + 1, nextMessageSet);
 
-                            ProtoWriter.EndSubItem(payload, writer);
-                            ProtoWriter.EndSubItem(grp, writer);
+                            ProtoWriter.EndSubItem(payload, writer, ref state);
+                            ProtoWriter.EndSubItem(grp, writer, ref state);
                         }
                         else
                         {
                             ProtoWriter.WriteFieldHeader(field.Number,
-                                field.type == FieldDescriptorProto.Type.TypeGroup ? WireType.StartGroup : WireType.String, writer);
-                            var tok = ProtoWriter.StartSubItem(null, writer);
+                                field.type == FieldDescriptorProto.Type.TypeGroup ? WireType.StartGroup : WireType.String, writer, ref state);
+                            var tok = ProtoWriter.StartSubItem(null, writer, ref state);
 
-                            AppendOptions(nextFile, writer, ctx, field.TypeName, option.Children, resolveOnly, depth + 1, nextMessageSet);
+                            AppendOptions(nextFile, writer, ref state, ctx, field.TypeName, option.Children, resolveOnly, depth + 1, nextMessageSet);
 
-                            ProtoWriter.EndSubItem(tok, writer);
+                            ProtoWriter.EndSubItem(tok, writer, ref state);
                         }
                     }
                     if (resolveOnly) return; // nothing more to do
@@ -1314,23 +1377,23 @@ namespace Google.Protobuf.Reflection
                         // need to write an empty object to match protoc
                         if (messageSet)
                         {
-                            ProtoWriter.WriteFieldHeader(1, WireType.StartGroup, writer);
-                            var grp = ProtoWriter.StartSubItem(null, writer);
+                            ProtoWriter.WriteFieldHeader(1, WireType.StartGroup, writer, ref state);
+                            var grp = ProtoWriter.StartSubItem(null, writer, ref state);
 
-                            ProtoWriter.WriteFieldHeader(2, WireType.Variant, writer);
-                            ProtoWriter.WriteInt32(field.Number, writer);
+                            ProtoWriter.WriteFieldHeader(2, WireType.Variant, writer, ref state);
+                            ProtoWriter.WriteInt32(field.Number, writer, ref state);
 
-                            ProtoWriter.WriteFieldHeader(3, WireType.String, writer);
-                            var payload = ProtoWriter.StartSubItem(null, writer);
-                            ProtoWriter.EndSubItem(payload, writer);
-                            ProtoWriter.EndSubItem(grp, writer);
+                            ProtoWriter.WriteFieldHeader(3, WireType.String, writer, ref state);
+                            var payload = ProtoWriter.StartSubItem(null, writer, ref state);
+                            ProtoWriter.EndSubItem(payload, writer, ref state);
+                            ProtoWriter.EndSubItem(grp, writer, ref state);
                         }
                         else
                         {
                             ProtoWriter.WriteFieldHeader(field.Number,
-                                   field.type == FieldDescriptorProto.Type.TypeGroup ? WireType.StartGroup : WireType.String, writer);
-                            var payload = ProtoWriter.StartSubItem(null, writer);
-                            ProtoWriter.EndSubItem(payload, writer);
+                                   field.type == FieldDescriptorProto.Type.TypeGroup ? WireType.StartGroup : WireType.String, writer, ref state);
+                            var payload = ProtoWriter.StartSubItem(null, writer, ref state);
+                            ProtoWriter.EndSubItem(payload, writer, ref state);
                         }
                         option.Options.Single().Applied = true;
                     }
@@ -1338,7 +1401,7 @@ namespace Google.Protobuf.Reflection
                     {
                         foreach (var values in option.Options)
                         {
-                            ctx.Errors.Error(option.Token, $"unable to assign custom option '{option.Name}' for '{extendee}'");
+                            ctx.Errors.Error(option.Token, $"unable to assign custom option '{option.Name}' for '{extendee}'", ErrorCode.MissingCustomOption);
                         }
                     }
                     break;
@@ -1347,7 +1410,7 @@ namespace Google.Protobuf.Reflection
 
                     foreach (var child in option.Children)
                     {
-                        ctx.Errors.Error(option.Token, $"unable to assign custom option '{child.Name}' for '{extendee}'");
+                        ctx.Errors.Error(option.Token, $"unable to assign custom option '{child.Name}' for '{extendee}'", ErrorCode.MissingCustomOption);
                     }
                     foreach (var value in option.Options)
                     {
@@ -1357,25 +1420,25 @@ namespace Google.Protobuf.Reflection
                             case FieldDescriptorProto.Type.TypeFloat:
                                 if (!TokenExtensions.TryParseSingle(value.AggregateValue, out var f32))
                                 {
-                                    ctx.Errors.Error(option.Token, $"invalid value for floating point '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'");
+                                    ctx.Errors.Error(option.Token, $"invalid value for floating point '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'", ErrorCode.InvalidFloatingPoint);
                                     continue;
                                 }
                                 if (ShouldWrite(field, value.AggregateValue, "0"))
                                 {
-                                    ProtoWriter.WriteFieldHeader(field.Number, WireType.Fixed32, writer);
-                                    ProtoWriter.WriteSingle(f32, writer);
+                                    ProtoWriter.WriteFieldHeader(field.Number, WireType.Fixed32, writer, ref state);
+                                    ProtoWriter.WriteSingle(f32, writer, ref state);
                                 }
                                 break;
                             case FieldDescriptorProto.Type.TypeDouble:
                                 if (!TokenExtensions.TryParseDouble(value.AggregateValue, out var f64))
                                 {
-                                    ctx.Errors.Error(option.Token, $"invalid value for floating point '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'");
+                                    ctx.Errors.Error(option.Token, $"invalid value for floating point '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'", ErrorCode.InvalidFloatingPoint);
                                     continue;
                                 }
                                 if (ShouldWrite(field, value.AggregateValue, "0"))
                                 {
-                                    ProtoWriter.WriteFieldHeader(field.Number, WireType.Fixed64, writer);
-                                    ProtoWriter.WriteDouble(f64, writer);
+                                    ProtoWriter.WriteFieldHeader(field.Number, WireType.Fixed64, writer, ref state);
+                                    ProtoWriter.WriteDouble(f64, writer, ref state);
                                 }
                                 break;
                             case FieldDescriptorProto.Type.TypeBool:
@@ -1388,13 +1451,13 @@ namespace Google.Protobuf.Reflection
                                         i32 = 0;
                                         break;
                                     default:
-                                        ctx.Errors.Error(option.Token, $"invalid value for boolean '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'");
+                                        ctx.Errors.Error(option.Token, $"invalid value for boolean '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'", ErrorCode.InvalidBoolean);
                                         continue;
                                 }
                                 if (ShouldWrite(field, value.AggregateValue, "false"))
                                 {
-                                    ProtoWriter.WriteFieldHeader(field.Number, WireType.Variant, writer);
-                                    ProtoWriter.WriteInt32(i32, writer);
+                                    ProtoWriter.WriteFieldHeader(field.Number, WireType.Variant, writer, ref state);
+                                    ProtoWriter.WriteInt32(i32, writer, ref state);
                                 }
                                 break;
                             case FieldDescriptorProto.Type.TypeUint32:
@@ -1402,7 +1465,7 @@ namespace Google.Protobuf.Reflection
                                 {
                                     if (!TokenExtensions.TryParseUInt32(value.AggregateValue, out var ui32))
                                     {
-                                        ctx.Errors.Error(option.Token, $"invalid value for unsigned integer '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'");
+                                        ctx.Errors.Error(option.Token, $"invalid value for unsigned integer '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'", ErrorCode.InvalidInteger);
                                         continue;
                                     }
                                     if (ShouldWrite(field, value.AggregateValue, "0"))
@@ -1410,13 +1473,13 @@ namespace Google.Protobuf.Reflection
                                         switch (field.type)
                                         {
                                             case FieldDescriptorProto.Type.TypeUint32:
-                                                ProtoWriter.WriteFieldHeader(field.Number, WireType.Variant, writer);
+                                                ProtoWriter.WriteFieldHeader(field.Number, WireType.Variant, writer, ref state);
                                                 break;
                                             case FieldDescriptorProto.Type.TypeFixed32:
-                                                ProtoWriter.WriteFieldHeader(field.Number, WireType.Fixed32, writer);
+                                                ProtoWriter.WriteFieldHeader(field.Number, WireType.Fixed32, writer, ref state);
                                                 break;
                                         }
-                                        ProtoWriter.WriteUInt32(ui32, writer);
+                                        ProtoWriter.WriteUInt32(ui32, writer, ref state);
                                     }
                                 }
                                 break;
@@ -1425,7 +1488,7 @@ namespace Google.Protobuf.Reflection
                                 {
                                     if (!TokenExtensions.TryParseUInt64(value.AggregateValue, out var ui64))
                                     {
-                                        ctx.Errors.Error(option.Token, $"invalid value for unsigned integer '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'");
+                                        ctx.Errors.Error(option.Token, $"invalid value for unsigned integer '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'", ErrorCode.InvalidInteger);
                                         continue;
                                     }
                                     if (ShouldWrite(field, value.AggregateValue, "0"))
@@ -1433,13 +1496,13 @@ namespace Google.Protobuf.Reflection
                                         switch (field.type)
                                         {
                                             case FieldDescriptorProto.Type.TypeUint64:
-                                                ProtoWriter.WriteFieldHeader(field.Number, WireType.Variant, writer);
+                                                ProtoWriter.WriteFieldHeader(field.Number, WireType.Variant, writer, ref state);
                                                 break;
                                             case FieldDescriptorProto.Type.TypeFixed64:
-                                                ProtoWriter.WriteFieldHeader(field.Number, WireType.Fixed64, writer);
+                                                ProtoWriter.WriteFieldHeader(field.Number, WireType.Fixed64, writer, ref state);
                                                 break;
                                         }
-                                        ProtoWriter.WriteUInt64(ui64, writer);
+                                        ProtoWriter.WriteUInt64(ui64, writer, ref state);
                                     }
                                 }
                                 break;
@@ -1448,7 +1511,7 @@ namespace Google.Protobuf.Reflection
                             case FieldDescriptorProto.Type.TypeSfixed32:
                                 if (!TokenExtensions.TryParseInt32(value.AggregateValue, out i32))
                                 {
-                                    ctx.Errors.Error(option.Token, $"invalid value for integer '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'");
+                                    ctx.Errors.Error(option.Token, $"invalid value for integer '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'", ErrorCode.InvalidInteger);
                                     continue;
                                 }
                                 if (ShouldWrite(field, value.AggregateValue, "0"))
@@ -1456,16 +1519,16 @@ namespace Google.Protobuf.Reflection
                                     switch (field.type)
                                     {
                                         case FieldDescriptorProto.Type.TypeInt32:
-                                            ProtoWriter.WriteFieldHeader(field.Number, WireType.Variant, writer);
+                                            ProtoWriter.WriteFieldHeader(field.Number, WireType.Variant, writer, ref state);
                                             break;
                                         case FieldDescriptorProto.Type.TypeSint32:
-                                            ProtoWriter.WriteFieldHeader(field.Number, WireType.SignedVariant, writer);
+                                            ProtoWriter.WriteFieldHeader(field.Number, WireType.SignedVariant, writer, ref state);
                                             break;
                                         case FieldDescriptorProto.Type.TypeSfixed32:
-                                            ProtoWriter.WriteFieldHeader(field.Number, WireType.Fixed32, writer);
+                                            ProtoWriter.WriteFieldHeader(field.Number, WireType.Fixed32, writer, ref state);
                                             break;
                                     }
-                                    ProtoWriter.WriteInt32(i32, writer);
+                                    ProtoWriter.WriteInt32(i32, writer, ref state);
                                 }
                                 break;
                             case FieldDescriptorProto.Type.TypeInt64:
@@ -1474,7 +1537,7 @@ namespace Google.Protobuf.Reflection
                                 {
                                     if (!TokenExtensions.TryParseInt64(value.AggregateValue, out var i64))
                                     {
-                                        ctx.Errors.Error(option.Token, $"invalid value for integer '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'");
+                                        ctx.Errors.Error(option.Token, $"invalid value for integer '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'", ErrorCode.InvalidInteger);
                                         continue;
                                     }
                                     if (ShouldWrite(field, value.AggregateValue, "0"))
@@ -1482,40 +1545,40 @@ namespace Google.Protobuf.Reflection
                                         switch (field.type)
                                         {
                                             case FieldDescriptorProto.Type.TypeInt64:
-                                                ProtoWriter.WriteFieldHeader(field.Number, WireType.Variant, writer);
+                                                ProtoWriter.WriteFieldHeader(field.Number, WireType.Variant, writer, ref state);
                                                 break;
                                             case FieldDescriptorProto.Type.TypeSint64:
-                                                ProtoWriter.WriteFieldHeader(field.Number, WireType.SignedVariant, writer);
+                                                ProtoWriter.WriteFieldHeader(field.Number, WireType.SignedVariant, writer, ref state);
                                                 break;
                                             case FieldDescriptorProto.Type.TypeSfixed64:
-                                                ProtoWriter.WriteFieldHeader(field.Number, WireType.Fixed64, writer);
+                                                ProtoWriter.WriteFieldHeader(field.Number, WireType.Fixed64, writer, ref state);
                                                 break;
                                         }
-                                        ProtoWriter.WriteInt64(i64, writer);
+                                        ProtoWriter.WriteInt64(i64, writer, ref state);
                                     }
                                 }
                                 break;
                             case FieldDescriptorProto.Type.TypeEnum:
                                 if (file.TryResolveEnum(field.TypeName, null, out var @enum, true, true))
                                 {
-                                    var found = @enum.Values.FirstOrDefault(x => x.Name == value.AggregateValue);
+                                    var found = @enum.Values.Find(x => x.Name == value.AggregateValue);
                                     if (found == null)
                                     {
-                                        ctx.Errors.Error(option.Token, $"invalid value for enum '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'");
+                                        ctx.Errors.Error(option.Token, $"invalid value for enum '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'", ErrorCode.EnumValueNotFound);
                                         continue;
                                     }
                                     else
                                     {
                                         if (ShouldWrite(field, value.AggregateValue, @enum.Values.FirstOrDefault()?.Name))
                                         {
-                                            ProtoWriter.WriteFieldHeader(field.Number, WireType.Variant, writer);
-                                            ProtoWriter.WriteInt32(found.Number, writer);
+                                            ProtoWriter.WriteFieldHeader(field.Number, WireType.Variant, writer, ref state);
+                                            ProtoWriter.WriteInt32(found.Number, writer, ref state);
                                         }
                                     }
                                 }
                                 else
                                 {
-                                    ctx.Errors.Error(option.Token, $"unable to resolve enum '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'");
+                                    ctx.Errors.Error(option.Token, $"unable to resolve enum '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'", ErrorCode.EnumValueNotFound);
                                     continue;
                                 }
                                 break;
@@ -1523,32 +1586,34 @@ namespace Google.Protobuf.Reflection
                             case FieldDescriptorProto.Type.TypeBytes:
                                 if (ShouldWrite(field, value.AggregateValue, ""))
                                 {
-                                    ProtoWriter.WriteFieldHeader(field.Number, WireType.String, writer);
+                                    ProtoWriter.WriteFieldHeader(field.Number, WireType.String, writer, ref state);
                                     if (value.AggregateValue == null || value.AggregateValue.IndexOf('\\') < 0)
-                                        ProtoWriter.WriteString(value.AggregateValue ?? "", writer);
+                                    {
+                                        ProtoWriter.WriteString(value.AggregateValue ?? "", writer, ref state);
+                                    }
                                     else
                                     {
                                         using (var ms = new MemoryStream(value.AggregateValue.Length))
                                         {
                                             if (!LoadBytes(ms, value.AggregateValue))
                                             {
-                                                ctx.Errors.Error(option.Token, $"invalid escape sequence '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'");
+                                                ctx.Errors.Error(option.Token, $"invalid escape sequence '{field.TypeName}': '{option.Name}' = '{value.AggregateValue}'", ErrorCode.InvalidEscapeSequence);
                                                 continue;
                                             }
 #if NETSTANDARD1_3
                                             if (ms.TryGetBuffer(out var seg))
-                                                ProtoWriter.WriteBytes(seg.Array, seg.Offset, seg.Count, writer);
+                                                ProtoWriter.WriteBytes(seg.Array, seg.Offset, seg.Count, writer, ref state);
                                             else
-                                                ProtoWriter.WriteBytes(ms.ToArray(), writer);
+                                                ProtoWriter.WriteBytes(ms.ToArray(), writer, ref state);
 #else
-                                            ProtoWriter.WriteBytes(ms.GetBuffer(), 0, (int)ms.Length, writer);
+                                            ProtoWriter.WriteBytes(ms.GetBuffer(), 0, (int)ms.Length, writer, ref state);
 #endif
                                         }
                                     }
                                 }
                                 break;
                             default:
-                                ctx.Errors.Error(option.Token, $"{field.type} options not yet implemented: '{option.Name}' = '{value.AggregateValue}'");
+                                ctx.Errors.Error(option.Token, $"{field.type} options not yet implemented: '{option.Name}' = '{value.AggregateValue}'", ErrorCode.OptionsNotImplemented);
                                 continue;
                         }
                         value.Applied = true;
@@ -1596,7 +1661,7 @@ namespace Google.Protobuf.Reflection
         }
     }
 
-    partial class EnumDescriptorProto : ISchemaObject, IType
+    public partial class EnumDescriptorProto : ISchemaObject, IType
     {
         public override string ToString() => Name;
         internal IType Parent { get; set; }
@@ -1631,11 +1696,9 @@ namespace Google.Protobuf.Reflection
             }
             ctx.AbortState = AbortState.None;
         }
-
     }
-    partial class FieldDescriptorProto : ISchemaObject
+    public partial class FieldDescriptorProto : ISchemaObject
     {
-
         public bool IsPacked(string syntax)
         {
             if (label != Label.LabelRepeated) return false;
@@ -1643,12 +1706,7 @@ namespace Google.Protobuf.Reflection
             var exp = Options?.Packed;
             if (exp.HasValue) return exp.GetValueOrDefault();
 
-            if (syntax != FileDescriptorProto.SyntaxProto2 && FieldDescriptorProto.CanPack(type))
-            {
-                return true;
-            }
-
-            return false;
+            return syntax != FileDescriptorProto.SyntaxProto2 && FieldDescriptorProto.CanPack(type);
         }
         public override string ToString() => Name;
         internal const int DefaultMaxField = 536870911;
@@ -1662,10 +1720,10 @@ namespace Google.Protobuf.Reflection
 
         internal static bool TryParse(ParserContext ctx, IMessage parent, bool isOneOf, out FieldDescriptorProto field)
         {
-            void NotAllowedOneOf(ParserContext context)
+            void NotAllowedOneOf(ParserContext context, ErrorCode errorCode)
             {
                 var token = ctx.Tokens.Previous;
-                context.Errors.Error(token, $"'{token.Value}' not allowed with 'oneof'");
+                context.Errors.Error(token, $"'{token.Value}' not allowed with 'oneof'", errorCode);
             }
             var tokens = ctx.Tokens;
             ctx.AbortState = AbortState.Statement;
@@ -1673,31 +1731,31 @@ namespace Google.Protobuf.Reflection
 
             if (tokens.ConsumeIf(TokenType.AlphaNumeric, "repeated"))
             {
-                if (isOneOf) NotAllowedOneOf(ctx);
+                if (isOneOf) NotAllowedOneOf(ctx, ErrorCode.OneOfRepeated);
                 label = Label.LabelRepeated;
             }
             else if (tokens.ConsumeIf(TokenType.AlphaNumeric, "required"))
             {
-                if (isOneOf) NotAllowedOneOf(ctx);
+                if (isOneOf) NotAllowedOneOf(ctx, ErrorCode.OneOfRequired);
                 else tokens.Previous.RequireProto2(ctx);
                 label = Label.LabelRequired;
             }
             else if (tokens.ConsumeIf(TokenType.AlphaNumeric, "optional"))
             {
-                if (isOneOf) NotAllowedOneOf(ctx);
+                if (isOneOf) NotAllowedOneOf(ctx, ErrorCode.OneOfOptional);
                 else tokens.Previous.RequireProto2(ctx);
                 label = Label.LabelOptional;
             }
             else if (ctx.Syntax == FileDescriptorProto.SyntaxProto2 && !isOneOf)
             {
                 // required in proto2
-                throw tokens.Read().Throw("expected 'repeated' / 'required' / 'optional'");
+                throw tokens.Read().Throw(ErrorCode.ExpectedArity, "expected 'repeated' / 'required' / 'optional'");
             }
 
             var typeToken = tokens.Read();
             if (typeToken.Is(TokenType.AlphaNumeric, "map"))
             {
-                tokens.Previous.Throw($"'{tokens.Previous.Value}' can not be used with 'map'");
+                tokens.Previous.Throw(ErrorCode.InvalidMapUsage, $"'{tokens.Previous.Value}' can not be used with 'map'");
             }
             string typeName = tokens.Consume(TokenType.AlphaNumeric);
 
@@ -1720,28 +1778,27 @@ namespace Google.Protobuf.Reflection
 
             if (number < 1 || number > parent.MaxField)
             {
-                ctx.Errors.Error(numberToken, $"field numbers must be in the range 1-{parent.MaxField}");
+                ctx.Errors.Error(numberToken, $"field numbers must be in the range 1-{parent.MaxField}", ErrorCode.FieldNumberInvalid);
             }
             else if (number >= FirstReservedField && number <= LastReservedField)
             {
-                ctx.Errors.Warn(numberToken, $"field numbers in the range {FirstReservedField}-{LastReservedField} are reserved; this may cause problems on many implementations");
+                ctx.Errors.Warn(numberToken, $"field numbers in the range {FirstReservedField}-{LastReservedField} are reserved; this may cause problems on many implementations", ErrorCode.FieldNumberReserved);
             }
             ctx.CheckNames(parent, name, nameToken);
             if (parent is DescriptorProto parentTyped)
             {
-
-                var conflict = parentTyped.Fields.FirstOrDefault(x => x.Number == number);
+                var conflict = parentTyped.Fields.Find(x => x.Number == number);
                 if (conflict != null)
                 {
-                    ctx.Errors.Error(numberToken, $"field {number} is already in use by '{conflict.Name}'");
+                    ctx.Errors.Error(numberToken, $"field {number} is already in use by '{conflict.Name}'", ErrorCode.FieldDuplicatedNumber);
                 }
                 if (parentTyped.ReservedNames.Contains(name))
                 {
-                    ctx.Errors.Error(nameToken, $"field '{name}' is reserved");
+                    ctx.Errors.Error(nameToken, $"field '{name}' is reserved", ErrorCode.FieldNameReserved);
                 }
                 if (parentTyped.ReservedRanges.Any(x => x.Start <= number && x.End > number))
                 {
-                    ctx.Errors.Error(numberToken, $"field {number} is reserved");
+                    ctx.Errors.Error(numberToken, $"field {number} is reserved", ErrorCode.FieldNumberReserved);
                 }
             }
 
@@ -1756,7 +1813,7 @@ namespace Google.Protobuf.Reflection
                 var firstChar = typeName[0].ToString();
                 if (firstChar.ToLowerInvariant() == firstChar)
                 {
-                    ctx.Errors.Error(nameToken, "group names must start with an upper-case letter");
+                    ctx.Errors.Error(nameToken, "group names must start with an upper-case letter", ErrorCode.GroupNamesStartUpperCase);
                 }
                 name = typeName.ToLowerInvariant();
                 if (ctx.TryReadObject<DescriptorProto>(out var grpType))
@@ -1794,10 +1851,9 @@ namespace Google.Protobuf.Reflection
             ctx.AbortState = AbortState.None;
             return true;
         }
-        static readonly char[] Underscores = { '_' };
+        private static readonly char[] Underscores = { '_' };
         internal static string GetJsonName(string name)
             => Regex.Replace(name, "_+([0-9a-zA-Z])", match => match.Groups[1].Value.ToUpperInvariant()).TrimEnd(Underscores);
-
 
         internal static bool CanPack(Type type)
         {
@@ -1847,7 +1903,7 @@ namespace Google.Protobuf.Reflection
                 case "uint32": return Assign(Type.TypeUint32, out @type);
                 case "uint64": return Assign(Type.TypeUint64, out @type);
                 default:
-                    type = default(Type);
+                    type = default;
                     return false;
             }
         }
@@ -1861,7 +1917,7 @@ namespace Google.Protobuf.Reflection
 
         void ISchemaObject.ReadOne(ParserContext ctx) => throw new InvalidOperationException();
 
-        class DummyExtensions : ISchemaObject, IHazNames, IMessage
+        private class DummyExtensions : ISchemaObject, IHazNames, IMessage
         {
             int IMessage.MaxField => message.MaxField;
             List<DescriptorProto> IMessage.Types => message.Types;
@@ -1894,8 +1950,8 @@ namespace Google.Protobuf.Reflection
                 ctx.AbortState = AbortState.None;
             }
 
-            private IMessage message;
-            private string extendee;
+            private readonly IMessage message;
+            private readonly string extendee;
 
             public DummyExtensions(string extendee, IMessage message)
             {
@@ -1913,7 +1969,7 @@ namespace Google.Protobuf.Reflection
         List<FieldDescriptorProto> Fields { get; }
     }
 
-    partial class ServiceDescriptorProto : ISchemaObject
+    public partial class ServiceDescriptorProto : ISchemaObject
     {
         internal static bool TryParse(ParserContext ctx, out ServiceDescriptorProto obj)
         {
@@ -1943,7 +1999,7 @@ namespace Google.Protobuf.Reflection
         }
     }
 
-    partial class MethodDescriptorProto : ISchemaObject
+    public partial class MethodDescriptorProto : ISchemaObject
     {
         internal Token InputTypeToken { get; set; }
         internal Token OutputTypeToken { get; set; }
@@ -1995,7 +2051,7 @@ namespace Google.Protobuf.Reflection
         }
     }
 
-    partial class EnumValueDescriptorProto
+    public partial class EnumValueDescriptorProto
     {
         internal static EnumValueDescriptorProto Parse(ParserContext ctx)
         {
@@ -2013,9 +2069,8 @@ namespace Google.Protobuf.Reflection
             return obj;
         }
         internal EnumDescriptorProto Parent { get; set; }
-
     }
-    partial class MessageOptions : ISchemaOptions
+    public partial class MessageOptions : ISchemaOptions
     {
         string ISchemaOptions.Extendee => FileDescriptorSet.Namespace + nameof(MessageOptions);
         bool ISchemaOptions.ReadOne(ParserContext ctx, string key)
@@ -2024,7 +2079,7 @@ namespace Google.Protobuf.Reflection
             {
                 case "map_entry":
                     MapEntry = ctx.Tokens.ConsumeBoolean();
-                    ctx.Errors.Error(ctx.Tokens.Previous, "'map_entry' should not be set explicitly; use 'map<TKey,TValue>' instead");
+                    ctx.Errors.Error(ctx.Tokens.Previous, "'map_entry' should not be set explicitly; use 'map<TKey,TValue>' instead", ErrorCode.MapUseMapEntry);
                     return true;
                 case "message_set_wire_format": MessageSetWireFormat = ctx.Tokens.ConsumeBoolean(); return true;
                 case "no_standard_descriptor_accessor": NoStandardDescriptorAccessor = ctx.Tokens.ConsumeBoolean(); return true;
@@ -2037,7 +2092,7 @@ namespace Google.Protobuf.Reflection
             set { DescriptorProto.SetExtensionData(this, value); }
         }
     }
-    partial class MethodOptions : ISchemaOptions
+    public partial class MethodOptions : ISchemaOptions
     {
         string ISchemaOptions.Extendee => FileDescriptorSet.Namespace + nameof(MethodOptions);
         bool ISchemaOptions.ReadOne(ParserContext ctx, string key)
@@ -2054,7 +2109,7 @@ namespace Google.Protobuf.Reflection
             set { DescriptorProto.SetExtensionData(this, value); }
         }
     }
-    partial class ServiceOptions : ISchemaOptions
+    public partial class ServiceOptions : ISchemaOptions
     {
         string ISchemaOptions.Extendee => FileDescriptorSet.Namespace + nameof(ServiceOptions);
         bool ISchemaOptions.ReadOne(ParserContext ctx, string key) => false;
@@ -2066,9 +2121,9 @@ namespace Google.Protobuf.Reflection
         }
     }
 
-    partial class UninterpretedOption
+    public partial class UninterpretedOption
     {
-        partial class NamePart
+        public partial class NamePart
         {
             public override string ToString() => IsExtension ? ("(" + name_part + ")") : name_part;
             internal Token Token { get; set; }
@@ -2076,7 +2131,8 @@ namespace Google.Protobuf.Reflection
         internal bool Applied { get; set; }
         internal Token Token { get; set; }
     }
-    partial class EnumOptions : ISchemaOptions
+
+    public partial class EnumOptions : ISchemaOptions
     {
         string ISchemaOptions.Extendee => FileDescriptorSet.Namespace + nameof(EnumOptions);
         bool ISchemaOptions.ReadOne(ParserContext ctx, string key)
@@ -2093,7 +2149,7 @@ namespace Google.Protobuf.Reflection
             set { DescriptorProto.SetExtensionData(this, value); }
         }
     }
-    partial class EnumValueOptions : ISchemaOptions
+    public partial class EnumValueOptions : ISchemaOptions
     {
         string ISchemaOptions.Extendee => FileDescriptorSet.Namespace + nameof(EnumValueOptions);
         bool ISchemaOptions.ReadOne(ParserContext ctx, string key) => false;
@@ -2104,7 +2160,7 @@ namespace Google.Protobuf.Reflection
             set { DescriptorProto.SetExtensionData(this, value); }
         }
     }
-    partial class FieldOptions : ISchemaOptions
+    public partial class FieldOptions : ISchemaOptions
     {
         string ISchemaOptions.Extendee => FileDescriptorSet.Namespace + nameof(FieldOptions);
         bool ISchemaOptions.ReadOne(ParserContext ctx, string key)
@@ -2126,7 +2182,7 @@ namespace Google.Protobuf.Reflection
             set { DescriptorProto.SetExtensionData(this, value); }
         }
     }
-    partial class FileOptions : ISchemaOptions
+    public partial class FileOptions : ISchemaOptions
     {
         string ISchemaOptions.Extendee => FileDescriptorSet.Namespace + nameof(FileOptions);
         bool ISchemaOptions.ReadOne(ParserContext ctx, string key)
@@ -2168,10 +2224,10 @@ namespace ProtoBuf.Reflection
 {
     internal static class ErrorExtensions
     {
-        public static void Warn(this List<Error> errors, Token token, string message)
-            => errors.Add(new Error(token, message, false));
-        public static void Error(this List<Error> errors, Token token, string message)
-            => errors.Add(new Error(token, message, true));
+        public static void Warn(this List<Error> errors, Token token, string message, ErrorCode code)
+            => errors.Add(new Error(token, message, false, code));
+        public static void Error(this List<Error> errors, Token token, string message, ErrorCode code)
+            => errors.Add(new Error(token, message, true, code));
         public static void Error(this List<Error> errors, ParserException ex)
             => errors.Add(new Error(ex));
     }
@@ -2248,15 +2304,15 @@ namespace ProtoBuf.Reflection
             List<Error> errors = new List<Error>();
             using (var reader = new StringReader(stdout))
             {
-                Add(reader, errors);
+                Add(reader, errors, ProtoBuf.ErrorCode.ProtocError);
             }
             using (var reader = new StringReader(stderr))
             {
-                Add(reader, errors);
+                Add(reader, errors, ProtoBuf.ErrorCode.ProtocError);
             }
             return errors.ToArray();
         }
-        static void Add(TextReader lines, List<Error> errors)
+        private static void Add(TextReader lines, List<Error> errors, ErrorCode code)
         {
             string line;
             while ((line = lines.ReadLine()) != null)
@@ -2289,7 +2345,7 @@ namespace ProtoBuf.Reflection
                         columnNumber = 1;
                     s = s.Substring(match.Length).Trim();
                 }
-                errors.Add(new Error(new Token(" ", lineNumber, columnNumber, TokenType.None, "", 0, file), s, isError));
+                errors.Add(new Error(new Token(" ", lineNumber, columnNumber, TokenType.None, "", 0, file), s, isError, code));
             }
         }
         internal string ToString(bool includeType) => Text.Length == 0
@@ -2306,7 +2362,7 @@ namespace ProtoBuf.Reflection
 
         private static readonly Error[] noErrors = new Error[0];
 
-        internal Error(Token token, string message, bool isError)
+        internal Error(Token token, string message, bool isError, ErrorCode code)
         {
             ColumnNumber = token.ColumnNumber;
             LineNumber = token.LineNumber;
@@ -2315,7 +2371,14 @@ namespace ProtoBuf.Reflection
             Message = message;
             IsError = isError;
             Text = token.Value;
+            TypedCode = code;
         }
+
+        private ErrorCode TypedCode { get; }
+        /// <summary>
+        /// The error code defined for this scenario
+        /// </summary>
+        public int ErrorNumber => (int)TypedCode;
         internal Error(ParserException ex)
         {
             ColumnNumber = ex.ColumnNumber;
@@ -2325,6 +2388,7 @@ namespace ProtoBuf.Reflection
             Message = ex.Message;
             IsError = ex.IsError;
             Text = ex.Text ?? "";
+            TypedCode = ex.ErrorCode;
         }
         /// <summary>
         /// True if this instance represents a non-fatal warning
@@ -2359,11 +2423,11 @@ namespace ProtoBuf.Reflection
         /// </summary>
         public int ColumnNumber { get; }
     }
-    enum AbortState
+    internal enum AbortState
     {
         None, Statement, Object
     }
-    interface ISchemaOptions
+    internal interface ISchemaOptions
     {
         List<UninterpretedOption> UninterpretedOptions { get; }
         bool Deprecated { get; set; }
@@ -2372,12 +2436,12 @@ namespace ProtoBuf.Reflection
         string Extendee { get; }
     }
 
-    interface IHazNames
+    internal interface IHazNames
     {
         IEnumerable<string> GetNames();
     }
 
-    interface ISchemaObject
+    internal interface ISchemaObject
     {
         void ReadOne(ParserContext ctx);
     }
@@ -2404,7 +2468,7 @@ namespace ProtoBuf.Reflection
                 if (Tokens.Peek(out var stateAfter) && stateBefore == stateAfter)
                 {
                     // we didn't move! avoid looping forever failing to do the same thing
-                    Errors.Error(stateAfter, "unknown error");
+                    Errors.Error(stateAfter, "unknown error", ErrorCode.UnknownParseError);
                     state = stateAfter.Is(TokenType.Symbol, "}")
                         ? AbortState.Object : AbortState.Statement;
                 }
@@ -2425,15 +2489,13 @@ namespace ProtoBuf.Reflection
             var tokens = Tokens;
             while (tokens.Peek(out var token))
             {
-                if (tokens.ConsumeIf(TokenType.Symbol, ";"))
-                { }
-                else
+                if (!tokens.ConsumeIf(TokenType.Symbol, ";"))
                 {
                     ReadOne(obj);
                 }
             }
         }
-        static readonly char[] Period = { '.' };
+        private static readonly char[] Period = { '.' };
         private void ReadOption<T>(ref T obj, ISchemaObject parent, List<UninterpretedOption.NamePart> existingNameParts = null) where T : class, ISchemaOptions, new()
         {
             var tokens = Tokens;
@@ -2492,7 +2554,6 @@ namespace ProtoBuf.Reflection
             }
             else
             {
-
                 var field = parent as FieldDescriptorProto;
                 bool isField = typeof(T) == typeof(FieldOptions) && field != null;
                 var singleKey = (nameParts.Count == 1 && !nameParts[0].IsExtension) ? nameParts[0].name_part : null;
@@ -2543,7 +2604,7 @@ namespace ProtoBuf.Reflection
                         case "false":
                             break;
                         default:
-                            Errors.Error(token, "expected 'true' or 'false'");
+                            Errors.Error(token, "expected 'true' or 'false'", ErrorCode.InvalidBoolean);
                             break;
                     }
                     break;
@@ -2561,7 +2622,7 @@ namespace ProtoBuf.Reflection
                             }
                             else
                             {
-                                Errors.Error(token, "invalid floating-point number");
+                                Errors.Error(token, "invalid floating-point number", ErrorCode.InvalidFloatingPoint);
                             }
                             break;
                     }
@@ -2580,7 +2641,7 @@ namespace ProtoBuf.Reflection
                             }
                             else
                             {
-                                Errors.Error(token, "invalid floating-point number");
+                                Errors.Error(token, "invalid floating-point number", ErrorCode.InvalidFloatingPoint);
                             }
                             break;
                     }
@@ -2595,7 +2656,7 @@ namespace ProtoBuf.Reflection
                         }
                         else
                         {
-                            Errors.Error(token, "invalid integer");
+                            Errors.Error(token, "invalid integer", ErrorCode.InvalidInteger);
                         }
                     }
                     break;
@@ -2608,7 +2669,7 @@ namespace ProtoBuf.Reflection
                         }
                         else
                         {
-                            Errors.Error(token, "invalid unsigned integer");
+                            Errors.Error(token, "invalid unsigned integer", ErrorCode.InvalidInteger);
                         }
                     }
                     break;
@@ -2622,7 +2683,7 @@ namespace ProtoBuf.Reflection
                         }
                         else
                         {
-                            Errors.Error(token, "invalid integer");
+                            Errors.Error(token, "invalid integer", ErrorCode.InvalidInteger);
                         }
                     }
                     break;
@@ -2635,7 +2696,7 @@ namespace ProtoBuf.Reflection
                         }
                         else
                         {
-                            Errors.Error(token, "invalid unsigned integer");
+                            Errors.Error(token, "invalid unsigned integer", ErrorCode.InvalidInteger);
                         }
                     }
                     break;
@@ -2645,38 +2706,24 @@ namespace ProtoBuf.Reflection
                 case FieldDescriptorProto.Type.TypeEnum:
                     break;
                 default:
-                    Errors.Error(token, $"default value not handled: {type}={defaultValue}");
+                    Errors.Error(token, $"default value not handled: {type}={defaultValue}", ErrorCode.DefaultValueNotHandled);
                     break;
             }
         }
 
-        static readonly char[] ExponentChars = { 'e', 'E' };
-        static readonly string[] ExponentFormats = { "e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9", "e10" };
-        static string Format(float val)
+        private static readonly char[] ExponentChars = { 'e', 'E' };
+        private static string Format(float val)
         {
             string s = val.ToString(CultureInfo.InvariantCulture);
-            if (s.IndexOfAny(ExponentChars) < 0) return s;
-
-            foreach (var format in ExponentFormats)
-            {
-                var tmp = val.ToString(format, CultureInfo.InvariantCulture);
-                if (float.TryParse(tmp, NumberStyles.Any, CultureInfo.InvariantCulture, out var x) && x == val) return tmp;
-            }
-            return val.ToString("e", CultureInfo.InvariantCulture);
-
+            return s.IndexOfAny(ExponentChars) < 0 ? s
+                : val.ToString("0e+00", CultureInfo.InvariantCulture);
         }
 
-        static string Format(double val)
+        private static string Format(double val)
         {
             string s = val.ToString(CultureInfo.InvariantCulture).ToUpperInvariant();
-            if (s.IndexOfAny(ExponentChars) < 0) return s;
-
-            foreach (var format in ExponentFormats)
-            {
-                var tmp = val.ToString(format, CultureInfo.InvariantCulture);
-                if (double.TryParse(tmp, NumberStyles.Any, CultureInfo.InvariantCulture, out var x) && x == val) return tmp;
-            }
-            return val.ToString("e", CultureInfo.InvariantCulture);
+            return s.IndexOfAny(ExponentChars) < 0 ? s
+                :  val.ToString("0e+00", CultureInfo.InvariantCulture);
         }
 
         public T ParseOptionBlock<T>(T obj, ISchemaObject parent = null) where T : class, ISchemaOptions, new()
@@ -2690,10 +2737,7 @@ namespace ProtoBuf.Reflection
                     {
                         break;
                     }
-                    else if (tokens.ConsumeIf(TokenType.Symbol, ","))
-                    {
-                    }
-                    else
+                    else if (!tokens.ConsumeIf(TokenType.Symbol, ","))
                     {
                         ReadOption(ref obj, parent);
                     }
@@ -2735,9 +2779,7 @@ namespace ProtoBuf.Reflection
                 tokens.Consume(TokenType.Symbol, "{");
                 while (tokens.Peek(out var token) && !token.Is(TokenType.Symbol, "}"))
                 {
-                    if (tokens.ConsumeIf(TokenType.Symbol, ";"))
-                    { }
-                    else
+                    if (!tokens.ConsumeIf(TokenType.Symbol, ";"))
                     {
                         ReadOne(obj);
                     }
@@ -2787,7 +2829,7 @@ namespace ProtoBuf.Reflection
 #if DEBUG && NETSTANDARD1_3
              + $" ({caller})"
 #endif
-                    );
+                     , ErrorCode.FieldDuplicatedName);
             }
         }
     }

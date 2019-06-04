@@ -1,70 +1,60 @@
 ﻿#if !NO_RUNTIME
 using System;
-
-#if FEAT_IKVM
-using Type = IKVM.Reflection.Type;
-using IKVM.Reflection;
-#else
 using System.Reflection;
-#endif
 
 namespace ProtoBuf.Serializers
 {
-    sealed class DateTimeSerializer : IProtoSerializer
+    internal sealed class DateTimeSerializer : IProtoSerializer
     {
-#if FEAT_IKVM
-        readonly Type expectedType;
-#else
-        static readonly Type expectedType = typeof(DateTime);
-#endif
+        private static readonly Type expectedType = typeof(DateTime);
+
         public Type ExpectedType => expectedType;
 
         bool IProtoSerializer.RequiresOldValue => false;
         bool IProtoSerializer.ReturnsValue => true;
 
         private readonly bool includeKind, wellKnown;
+
         public DateTimeSerializer(DataFormat dataFormat, ProtoBuf.Meta.TypeModel model)
         {
-#if FEAT_IKVM
-            expectedType = model.MapType(typeof(DateTime));
-#endif
             wellKnown = dataFormat == DataFormat.WellKnown;
-            includeKind = model != null && model.SerializeDateTimeKind();
+            includeKind = model?.SerializeDateTimeKind() == true;
         }
-#if !FEAT_IKVM
-        public object Read(object value, ProtoReader source)
+
+        public object Read(ProtoReader source, ref ProtoReader.State state, object value)
         {
-            if(wellKnown)
+            if (wellKnown)
             {
-                return BclHelpers.ReadTimestamp(source);
+                return BclHelpers.ReadTimestamp(source, ref state);
             }
             else
             {
                 Helpers.DebugAssert(value == null); // since replaces
-                return BclHelpers.ReadDateTime(source);
-            }            
+                return BclHelpers.ReadDateTime(source, ref state);
+            }
         }
-        public void Write(object value, ProtoWriter dest)
+
+        public void Write(ProtoWriter dest, ref ProtoWriter.State state, object value)
         {
-            if(wellKnown)
-                BclHelpers.WriteTimestamp((DateTime)value, dest);
-            else if(includeKind)
-                BclHelpers.WriteDateTimeWithKind((DateTime)value, dest);
+            if (wellKnown)
+                BclHelpers.WriteTimestamp((DateTime)value, dest, ref state);
+            else if (includeKind)
+                BclHelpers.WriteDateTimeWithKind((DateTime)value, dest, ref state);
             else
-                BclHelpers.WriteDateTime((DateTime)value, dest);
+                BclHelpers.WriteDateTime((DateTime)value, dest, ref state);
         }
-#endif
 #if FEAT_COMPILER
         void IProtoSerializer.EmitWrite(Compiler.CompilerContext ctx, Compiler.Local valueFrom)
         {
-            ctx.EmitWrite(ctx.MapType(typeof(BclHelpers)),
+            ctx.EmitWrite<BclHelpers>(
                 wellKnown ? nameof(BclHelpers.WriteTimestamp)
                 : includeKind ? nameof(BclHelpers.WriteDateTimeWithKind) : nameof(BclHelpers.WriteDateTime), valueFrom);
         }
-        void IProtoSerializer.EmitRead(Compiler.CompilerContext ctx, Compiler.Local valueFrom)
+
+        void IProtoSerializer.EmitRead(Compiler.CompilerContext ctx, Compiler.Local entity)
         {
-            if (wellKnown) ctx.LoadValue(valueFrom);
-            ctx.EmitBasicRead(ctx.MapType(typeof(BclHelpers)),
+            if (wellKnown) ctx.LoadValue(entity);
+            ctx.EmitBasicRead<BclHelpers>(
                 wellKnown ? nameof(BclHelpers.ReadTimestamp) : nameof(BclHelpers.ReadDateTime),
                 ExpectedType);
         }

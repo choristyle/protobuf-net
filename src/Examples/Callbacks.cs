@@ -184,7 +184,7 @@ namespace Examples
     
     public class Callbacks
     {
-        public static void Test<T, TCreate>(bool compile = false, params Type[] extraTypes)
+        private static void Test<T, TCreate>(bool compile = false, params Type[] extraTypes)
             where TCreate : T, new()
             where T : ICallbackTest
         {
@@ -212,13 +212,16 @@ namespace Examples
                 Test<T, TCreate>(model.Compile(), "Compile"); // <===== lots of private members etc
             }
         }
+#pragma warning disable xUnit2002, xUnit2005 // it is convinced that TCreate is a value-type
         static void Test<T, TCreate>(TypeModel model, string mode)
             where TCreate : T, new()
             where T : ICallbackTest
         {
             mode = ":" + mode;
-            TCreate cs = new TCreate();
-            cs.Bar = "abc";
+            TCreate cs = new TCreate
+            {
+                Bar = "abc"
+            };
             string ctorExpected = typeof (TCreate)._IsValueType() ? null : "ctor";
             Assert.NotNull(cs); //, "orig" + mode);
             Assert.Equal(ctorExpected, cs.History); //, "orig before" + mode);
@@ -249,6 +252,7 @@ namespace Examples
             Assert.Equal("abc", clone2.Bar); //, "clone2 after" + mode);
             
         }
+#pragma warning restore xUnit2002, xUnit2005
 
         [ProtoContract]
         class DuplicateCallbacks
@@ -456,14 +460,14 @@ namespace Examples
             public string Bar { get; set; }
         }
 
-        public void ManuallyWrittenSerializeCallbackStructSimple(CallbackStructSimple obj, ProtoWriter writer)
+        private void ManuallyWrittenSerializeCallbackStructSimple(CallbackStructSimple obj, ProtoWriter writer, ref ProtoWriter.State state)
         {
             obj.OnSerializing();
             string bar = obj.Bar;
             if(bar != null)
             {
-                ProtoWriter.WriteFieldHeader(1, WireType.String, writer);
-                ProtoWriter.WriteString(bar, writer);
+                ProtoWriter.WriteFieldHeader(1, WireType.String, writer, ref state);
+                ProtoWriter.WriteString(bar, writer, ref state);
             }
             obj.OnSerialized();
         }

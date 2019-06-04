@@ -1,52 +1,36 @@
 ﻿#if !NO_RUNTIME
 using System;
 
-#if FEAT_IKVM
-using Type = IKVM.Reflection.Type;
-using IKVM.Reflection;
-#else
-using System.Reflection;
-#endif
-
-
 namespace ProtoBuf.Serializers
 {
-    sealed class UInt32Serializer : IProtoSerializer
+    internal sealed class UInt32Serializer : IProtoSerializer
     {
-#if FEAT_IKVM
-        readonly Type expectedType;
-#else
-        static readonly Type expectedType = typeof(uint);
-#endif
-        public UInt32Serializer(ProtoBuf.Meta.TypeModel model)
-        {
-#if FEAT_IKVM
-            expectedType = model.MapType(typeof(uint));
-#endif
-        }
-        public Type ExpectedType { get { return expectedType; } }
+        private static readonly Type expectedType = typeof(uint);
 
-        bool IProtoSerializer.RequiresOldValue { get { return false; } }
-        bool IProtoSerializer.ReturnsValue { get { return true; } }
-#if !FEAT_IKVM
-        public object Read(object value, ProtoReader source)
+        public Type ExpectedType => expectedType;
+
+        bool IProtoSerializer.RequiresOldValue => false;
+
+        bool IProtoSerializer.ReturnsValue => true;
+
+        public object Read(ProtoReader source, ref ProtoReader.State state, object value)
         {
             Helpers.DebugAssert(value == null); // since replaces
-            return source.ReadUInt32();
+            return source.ReadUInt32(ref state);
         }
-        public void Write(object value, ProtoWriter dest)
+
+        public void Write(ProtoWriter dest, ref ProtoWriter.State state, object value)
         {
-            ProtoWriter.WriteUInt32((uint)value, dest);
+            ProtoWriter.WriteUInt32((uint)value, dest, ref state);
         }
-#endif
 #if FEAT_COMPILER
         void IProtoSerializer.EmitWrite(Compiler.CompilerContext ctx, Compiler.Local valueFrom)
         {
             ctx.EmitBasicWrite("WriteUInt32", valueFrom);
         }
-        void IProtoSerializer.EmitRead(Compiler.CompilerContext ctx, Compiler.Local valueFrom)
+        void IProtoSerializer.EmitRead(Compiler.CompilerContext ctx, Compiler.Local entity)
         {
-            ctx.EmitBasicRead("ReadUInt32", ctx.MapType(typeof(uint)));
+            ctx.EmitBasicRead("ReadUInt32", typeof(uint));
         }
 #endif
     }

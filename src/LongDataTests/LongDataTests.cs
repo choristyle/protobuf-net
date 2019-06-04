@@ -22,8 +22,7 @@ namespace LongDataTests
             {
                 int hash = -12323424;
                 hash = (hash * -17) + Id.GetHashCode();
-                hash = (hash * -17) + (SomeString?.GetHashCode() ?? 0);
-                return hash;
+                return (hash * -17) + (SomeString?.GetHashCode() ?? 0);
             }
         }
 
@@ -53,25 +52,24 @@ namespace LongDataTests
         {
             public override int GetHashCode()
             {
-                int hash = -12323424;
-                hash = (hash * -17) + (Group?.GetHashCode() ?? 0);
-                return hash;
+                const int hash = -12323424;
+                return (hash * -17) + (Group?.GetHashCode() ?? 0);
             }
             [ProtoMember(2, DataFormat = DataFormat.Group)]
             public MyModelOuter Group { get; set; }
         }
-        static MyModelOuter CreateOuterModel(int count)
+        private static MyModelOuter CreateOuterModel(int count)
         {
             var obj = new MyModelOuter();
             for (int i = 0; i < count; i++)
                 obj.Items.Add(new MyModelInner { Id = i, SomeString = "a long string that will be repeated lots and lots of times in the output data" });
             return obj;
         }
+#pragma warning disable xUnit1004 // Test methods should not be skipped
         [Fact(Skip="long running")]
+#pragma warning restore xUnit1004 // Test methods should not be skipped
         public void CanSerializeLongData()
         {
-
-
             Console.WriteLine($"PID: {Process.GetCurrentProcess().Id}");
             const string path = "large.data";
             var watch = Stopwatch.StartNew();
@@ -98,27 +96,27 @@ namespace LongDataTests
             {
                 Console.WriteLine($"Verifying {file.Length >> 20} MiB...");
                 watch = Stopwatch.StartNew();
-                using (var reader = new ProtoReader(file, null, null))
+                using (var reader = ProtoReader.Create(out var state, file, null, null))
                 {
                     int i = -1;
                     try
                     {
-                        Assert.Equal(2, reader.ReadFieldHeader());
+                        Assert.Equal(2, reader.ReadFieldHeader(ref state));
                         Assert.Equal(WireType.StartGroup, reader.WireType);
-                        var tok = ProtoReader.StartSubItem(reader);
+                        var tok = ProtoReader.StartSubItem(reader, ref state);
 
                         for (i = 0; i < COUNT; i++)
                         {
-                            Assert.Equal(1, reader.ReadFieldHeader());
+                            Assert.Equal(1, reader.ReadFieldHeader(ref state));
                             Assert.Equal(WireType.String, reader.WireType);
-                            reader.SkipField();
+                            reader.SkipField(ref state);
                         }
-                        Assert.False(reader.ReadFieldHeader() > 0);
-                        ProtoReader.EndSubItem(tok, reader);
+                        Assert.False(reader.ReadFieldHeader(ref state) > 0);
+                        ProtoReader.EndSubItem(tok, reader, ref state);
                     }
                     catch
                     {
-                        Console.WriteLine($"field 2, {i} of {COUNT}, @ {reader.LongPosition}");
+                        Console.WriteLine($"field 2, {i} of {COUNT}, @ {reader.GetPosition(ref state)}");
                         throw;
                     }
                 }

@@ -1,47 +1,35 @@
 ﻿#if !NO_RUNTIME
 using System;
-
-using ProtoBuf.Compiler;
-#if FEAT_IKVM
-using Type = IKVM.Reflection.Type;
-using IKVM.Reflection;
-#else
 using System.Reflection;
+
+#if FEAT_COMPILER
+using ProtoBuf.Compiler;
 #endif
 
 namespace ProtoBuf.Serializers
 {
-    sealed class UriDecorator : ProtoDecoratorBase
+    internal sealed class UriDecorator : ProtoDecoratorBase
     {
-#if FEAT_IKVM
-        readonly Type expectedType;
-#else
-        static readonly Type expectedType = typeof(Uri);
-#endif
-        public UriDecorator(ProtoBuf.Meta.TypeModel model, IProtoSerializer tail) : base(tail)
-        {
-#if FEAT_IKVM
-            expectedType = model.MapType(typeof(Uri));
-#endif
-        }
-        public override Type ExpectedType { get { return expectedType; } }
-        public override bool RequiresOldValue { get { return false; } }
-        public override bool ReturnsValue { get { return true; } }
-        
+        private static readonly Type expectedType = typeof(Uri);
+        public UriDecorator(IProtoSerializer tail) : base(tail) { }
 
-#if !FEAT_IKVM
-        public override void Write(object value, ProtoWriter dest)
+        public override Type ExpectedType => expectedType;
+
+        public override bool RequiresOldValue => false;
+
+        public override bool ReturnsValue => true;
+
+        public override void Write(ProtoWriter dest, ref ProtoWriter.State state, object value)
         {
-            Tail.Write(((Uri)value).OriginalString, dest);
+            Tail.Write(dest, ref state, ((Uri)value).OriginalString);
         }
 
-        public override object Read(object value, ProtoReader source)
+        public override object Read(ProtoReader source, ref ProtoReader.State state, object value)
         {
             Helpers.DebugAssert(value == null); // not expecting incoming
-            string s = (string)Tail.Read(null, source);
+            string s = (string)Tail.Read(source, ref state, null);
             return s.Length == 0 ? null : new Uri(s, UriKind.RelativeOrAbsolute);
         }
-#endif
 
 #if FEAT_COMPILER
         protected override void EmitWrite(Compiler.CompilerContext ctx, Compiler.Local valueFrom)
@@ -62,10 +50,10 @@ namespace ProtoBuf.Serializers
             ctx.Branch(@end, true);
             ctx.MarkLabel(@nonEmpty);
             ctx.LoadValue((int)UriKind.RelativeOrAbsolute);
-            ctx.EmitCtor(ctx.MapType(typeof(Uri)), ctx.MapType(typeof(string)), ctx.MapType(typeof(UriKind)));
+            ctx.EmitCtor(typeof(Uri), typeof(string), typeof(UriKind));
             ctx.MarkLabel(@end);
         }
-#endif 
+#endif
     }
 }
 #endif

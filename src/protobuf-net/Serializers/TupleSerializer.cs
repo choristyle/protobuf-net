@@ -1,39 +1,30 @@
 ﻿#if !NO_RUNTIME
 using System;
-using ProtoBuf.Meta;
-
-#if FEAT_IKVM
-using Type = IKVM.Reflection.Type;
-using IKVM.Reflection;
-#else
 using System.Reflection;
-#endif
+using ProtoBuf.Meta;
 
 namespace ProtoBuf.Serializers
 {
-    sealed class TupleSerializer : IProtoTypeSerializer
+    internal sealed class TupleSerializer : IProtoTypeSerializer
     {
         private readonly MemberInfo[] members;
         private readonly ConstructorInfo ctor;
-        private IProtoSerializer[] tails;
+        private readonly IProtoSerializer[] tails;
         public TupleSerializer(RuntimeTypeModel model, ConstructorInfo ctor, MemberInfo[] members)
         {
-            if (ctor == null) throw new ArgumentNullException("ctor");
-            if (members == null) throw new ArgumentNullException("members");
-            this.ctor = ctor;
-            this.members = members;
+            this.ctor = ctor ?? throw new ArgumentNullException(nameof(ctor));
+            this.members = members ?? throw new ArgumentNullException(nameof(members));
             this.tails = new IProtoSerializer[members.Length];
 
             ParameterInfo[] parameters = ctor.GetParameters();
             for (int i = 0; i < members.Length; i++)
             {
-                WireType wireType;
                 Type finalType = parameters[i].ParameterType;
 
                 Type itemType = null, defaultType = null;
 
                 MetaType.ResolveListTypes(model, finalType, ref itemType, ref defaultType);
-                Type tmp = itemType == null ? finalType : itemType;
+                Type tmp = itemType ?? finalType;
 
                 bool asReference = false;
                 int typeIndex = model.FindOrAddAuto(tmp, false, true, false);
@@ -41,7 +32,7 @@ namespace ProtoBuf.Serializers
                 {
                     asReference = model[tmp].AsReferenceDefault;
                 }
-                IProtoSerializer tail = ValueMember.TryGetCoreSerializer(model, DataFormat.Default, tmp, out wireType, asReference, false, false, true), serializer;
+                IProtoSerializer tail = ValueMember.TryGetCoreSerializer(model, DataFormat.Default, tmp, out WireType wireType, asReference, false, false, true), serializer;
                 if (tail == null)
                 {
                     throw new InvalidOperationException("No serializer defined for type: " + tmp.FullName);
@@ -56,11 +47,11 @@ namespace ProtoBuf.Serializers
                 {
                     if (finalType.IsArray)
                     {
-                        serializer = new ArrayDecorator(model, tail, i + 1, false, wireType, finalType, false, false);
+                        serializer = new ArrayDecorator(tail, i + 1, false, wireType, finalType, false, false);
                     }
                     else
                     {
-                        serializer = ListDecorator.Create(model, finalType, defaultType, tail, i + 1, false, wireType, true, false, false);
+                        serializer = ListDecorator.Create(finalType, defaultType, tail, i + 1, false, wireType, true, false, false);
                     }
                 }
                 tails[i] = serializer;
@@ -74,28 +65,19 @@ namespace ProtoBuf.Serializers
 #if FEAT_COMPILER
         public void EmitCallback(Compiler.CompilerContext ctx, Compiler.Local valueFrom, Meta.TypeModel.CallbackType callbackType) { }
 #endif
-        public Type ExpectedType
-        {
-            get { return ctor.DeclaringType; }
-        }
+        public Type ExpectedType => ctor.DeclaringType;
 
-
-
-#if !FEAT_IKVM
         void IProtoTypeSerializer.Callback(object value, Meta.TypeModel.CallbackType callbackType, SerializationContext context) { }
         object IProtoTypeSerializer.CreateInstance(ProtoReader source) { throw new NotSupportedException(); }
         private object GetValue(object obj, int index)
         {
-            PropertyInfo prop;
-            FieldInfo field;
-
-            if ((prop = members[index] as PropertyInfo) != null)
+            if (members[index] is PropertyInfo prop)
             {
                 if (obj == null)
                     return Helpers.IsValueType(prop.PropertyType) ? Activator.CreateInstance(prop.PropertyType) : null;
                 return prop.GetValue(obj, null);
             }
-            else if ((field = members[index] as FieldInfo) != null)
+            else if (members[index] is FieldInfo field)
             {
                 if (obj == null)
                     return Helpers.IsValueType(field.FieldType) ? Activator.CreateInstance(field.FieldType) : null;
@@ -106,7 +88,8 @@ namespace ProtoBuf.Serializers
                 throw new InvalidOperationException();
             }
         }
-        public object Read(object value, ProtoReader source)
+
+        public object Read(ProtoReader source, ref ProtoReader.State state, object value)
         {
             object[] values = new object[members.Length];
             bool invokeCtor = false;
@@ -117,48 +100,44 @@ namespace ProtoBuf.Serializers
             for (int i = 0; i < values.Length; i++)
                 values[i] = GetValue(value, i);
             int field;
-            while ((field = source.ReadFieldHeader()) > 0)
+            while ((field = source.ReadFieldHeader(ref state)) > 0)
             {
                 invokeCtor = true;
                 if (field <= tails.Length)
                 {
                     IProtoSerializer tail = tails[field - 1];
-                    values[field - 1] = tails[field - 1].Read(tail.RequiresOldValue ? values[field - 1] : null, source);
+                    values[field - 1] = tails[field - 1].Read(source, ref state, tail.RequiresOldValue ? values[field - 1] : null);
                 }
                 else
                 {
-                    source.SkipField();
+                    source.SkipField(ref state);
                 }
             }
             return invokeCtor ? ctor.Invoke(values) : value;
         }
-        public void Write(object value, ProtoWriter dest)
+
+        public void Write(ProtoWriter dest, ref ProtoWriter.State state, object value)
         {
             for (int i = 0; i < tails.Length; i++)
             {
                 object val = GetValue(value, i);
-                if (val != null) tails[i].Write(val, dest);
+                if (val != null) tails[i].Write(dest, ref state, val);
             }
         }
-#endif
-        public bool RequiresOldValue
-        {
-            get { return true; }
-        }
 
-        public bool ReturnsValue
-        {
-            get { return false; }
-        }
-        Type GetMemberType(int index)
+        public bool RequiresOldValue => true;
+
+        public bool ReturnsValue => false;
+
+        bool IProtoTypeSerializer.CanCreateInstance() { return false; }
+
+#if FEAT_COMPILER
+        private Type GetMemberType(int index)
         {
             Type result = Helpers.GetMemberType(members[index]);
             if (result == null) throw new InvalidOperationException();
             return result;
         }
-        bool IProtoTypeSerializer.CanCreateInstance() { return false; }
-
-#if FEAT_COMPILER
         public void EmitWrite(Compiler.CompilerContext ctx, Compiler.Local valueFrom)
         {
             using (Compiler.Local loc = ctx.GetLocalWithValue(ctor.DeclaringType, valueFrom))
@@ -268,7 +247,7 @@ namespace ProtoBuf.Serializers
 
                     if (!Helpers.IsValueType(ExpectedType)) ctx.MarkLabel(skipOld);
 
-                    using (Compiler.Local fieldNumber = new Compiler.Local(ctx, ctx.MapType(typeof(int))))
+                    using (Compiler.Local fieldNumber = new Compiler.Local(ctx, typeof(int)))
                     {
                         Compiler.CodeLabel @continue = ctx.DefineLabel(),
                                            processField = ctx.DefineLabel(),
@@ -319,11 +298,11 @@ namespace ProtoBuf.Serializers
                         }
 
                         ctx.MarkLabel(notRecognised);
-                        ctx.LoadReaderWriter();
-                        ctx.EmitCall(ctx.MapType(typeof(ProtoReader)).GetMethod("SkipField"));
+                        ctx.LoadReader(true);
+                        ctx.EmitCall(typeof(ProtoReader).GetMethod("SkipField", ProtoReader.State.StateTypeArray));
 
                         ctx.MarkLabel(@continue);
-                        ctx.EmitBasicRead("ReadFieldHeader", ctx.MapType(typeof(int)));
+                        ctx.EmitBasicRead("ReadFieldHeader", typeof(int));
                         ctx.CopyValue();
                         ctx.StoreValue(fieldNumber);
                         ctx.LoadValue(0);
@@ -346,7 +325,6 @@ namespace ProtoBuf.Serializers
                     }
                 }
             }
-
         }
 #endif
     }

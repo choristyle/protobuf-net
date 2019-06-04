@@ -2,33 +2,140 @@
 
 Packages are available on NuGet: [protobuf-net](https://www.nuget.org/packages/protobuf-net)
 
-If you prefer to build from source:
+protobuf-net needs to be built with MSBuild, due to some of the target platforms.
 
-    git clone https://github.com/mgravell/protobuf-net.git
-    cd protobuf-net\src\protobuf-net
-    dotnet restore
-    dotnet build -c Release
+The easiest way to do this is via Visual Studio 2017 ([community edition is free](https://www.visualstudio.com/downloads/)) - build `src\protobuf-net.sln`
 
-(it will tell you where the dlls and package have been written)
+## (not yet started)
 
-Alternatively, use Visual Studio 2017 ([community edition is free](https://www.visualstudio.com/downloads/)) to build `src\protobuf-net.sln`
-
-If you feel like supporting my efforts, I won't stop you:
-
-<a href='https://pledgie.com/campaigns/33946'><img alt='Click here to lend your support to: protobuf-net; fast binary serialization for .NET and make a donation at pledgie.com !' src='https://pledgie.com/campaigns/33946.png?skin_name=chrome' border='0' ></a>
-
-If you can't, that's fine too.
-
-## v3.* (not yet started)
-
-- see: [protobuf-net: large data, and the future](http://blog.marcgravell.com/2017/05/protobuf-net-large-data-and-future.html)
 - gRPC?
-
-## v2.4.0 (not yet started)
-
-- build-time tooling
+- build-time tooling from code-first
 - `dynamic` API over types known only via descriptors loaded at runtime
 - `Any` support
+
+
+## v3.0.0-alpha.3
+
+- **breaking change** (hence 3.0) if you are using `new ProtoReader(...)` - you must now use `ProtoReader.Create(...)`
+- if using `ProtoReader` you *should* now move to the `ref State` API too, although the old API will continue to
+  work with `Stream`-based readers; it **will not** work with `ReadOnlySequence<byte>` readers
+- "pipelines" (`ReadOnlySequence<byte>`) support for the **read** API (not write yet)
+- significant performance improvements in all read scenarios
+- new `CreateForAssembly(...)` API (various overloads) for working with precompiled (at runtime) type models (faster than `RuntimeTypeModel`, but less flexible)
+- significant amounts of code tidying; many yaks were shawn
+
+## v2.4.0
+
+- fix #442 - switched to 2.4.0 due to new versioning implementation breaking the assembly version; oops
+
+## v2.3.17
+
+- (#430/#431) - ensure build output from `protobuf-net.MSBuild` makes it into build output; add error codes
+- #429 - use `$IntermediateOutputPath` correctly from build tools
+
+## v2.3.16
+
+- new MSBuild .proto tools added (huge thanks go to Mark Pflug here)
+- fix error where extension GetValues might only report the last item
+- switch to git-based versioning implementation; versioning now unified over all tools
+- extensions codegen (C#): add `Get*` and `Add*` implementations for `repeated`; add `Set*` implementations for regular
+- update `protoc` to 3.6.1
+- give advance warning of possible removal of ProtoReader/ProtoWriter constructors
+- codegen (C#): implement "listset" option to control whether lists/maps get `set` accessors
+- `GetProto<T>` now emits `oneof`-style .proto syntax for inheritance
+
+## protobuf-net v2.3.15
+
+- merge #412/fix #408 - `ReadObject`/`WriteObject` failed on value types
+- merge #421 - support `IReadOnlyCollection` members
+- merge #424 - make WCF configuration features available on TFMs that support them
+- merge #396 - remove unnecessary #if defs
+
+## protogen v1.0.10
+
+- fix error in generated C# when using enums in discriminated unions (#423)
+
+## protobuf-net v2.3.14
+
+- add UAP TFM
+
+## protogen v1.0.9
+
+- fix #406 - relative and wildcard paths (`*.proto` etc) failed on `netcoreapp2.1`, impacting the "global tool"
+
+## protobuf-net v2.3.13
+
+- **IMPORTANT** fix #403 - key cache was incorrect in some cases involving multi-level inheritance; update from 2.3.8 or above is highly recommended
+
+## protobuf-net v2.3.12
+
+- fix #402 - zero `decimal` with non-trivial sign/scale should round-trip correctly
+- fix additional scenarios for #401
+
+## protobuf-net v2.3.11
+
+- fix #401 - error introduced in the new key cache from v2.3.8
+
+## protobuf-net v2.3.10
+
+- fix #388 - stability when `DynamicMethod` is not available (UWP, iOS, etc)
+
+## protogen v1.0.8
+
+- move default .proto imports (from v1.0.7) to embedded resources that work for all consumers
+
+## protogen v1.0.7
+
+- ship default google and protobuf-net imports with the "global tool" install
+
+## protobuf-net v2.3.9
+
+- fix behaviour of `DiscriminatedUnion*` for `None` enum case
+
+## protogen v1.0.6
+
+- add #393 - optional ability to emit enums for `oneof` [similar to Google's C# generator](https://developers.google.com/protocol-buffers/docs/reference/csharp-generated#oneof)
+- extend C# support down to 2.0 and up to 7.1, and VB support down to VB 9
+- add website support for additional options (as above)
+
+## protobuf-net v2.3.8
+
+- speculative fix for iOS issues (#381)
+- add discriminator accessor to discriminated union types, for protogen v1.0.6
+- improve performance of ProtoWriter.DemandSpace (#378 from szehetner)
+- protogen - better support for wildcard paths (#390 from RansomVO)
+- fix #313 immutable arrays (#346 from BryantL)
+- improve LOH behaviour (#307 from mintsoft)
+- allow model precompilation for unknown types (#326 from daef)
+- improve type-key lookup performance (#310 from alex-sherman)
+
+## protogen v1.0.5
+
+- allow default package name using #FILE# and #DIR# tokens
+- more fixes for VB.NET idioms
+
+## protogen v1.0.4
+
+- fixes for VB.NET code-gen (especially: overflow in default values)
+- add wildcard+recursive generation modes for all languages
+- fix resolution of rooted types in imports without a package
+
+## protogen v1.0.3
+
+- VB.NET code-gen support added (from: alpha2)
+- packaging updates for "global tools" (from: alpha1)
+
+## protogen v1.0.2
+
+- packaging updates (no code changes)
+
+## protogen v1.0.1
+
+- unknown fields (`IExtensible`) now preserved by default, in line with Google's v3.5.0 release
+
+## protobuf-net v2.3.7
+
+- add .NET Standard 1.0 "profile 259" support - contributed by Lorick Russow
 
 ## v2.3.6
 
@@ -76,7 +183,7 @@ If you can't, that's fine too.
 
 ## v2.3.0-alpha
 
-- [further reading](http://blog.marcgravell.com/2017/06/protobuf-net-gets-proto3-support.html)
+- [further reading](https://blog.marcgravell.com/2017/06/protobuf-net-gets-proto3-support.html)
 - proto2/proto3 DSL processing tools to make a resurgance; [preview is available here](https://protogen.marcgravell.com/)
 - proto3 schema generation
 - full support for `map<,>`, `Timestamp`, `Duration`
@@ -109,7 +216,7 @@ If you can't, that's fine too.
 - fix bug with cyclic types resolving as lists (#167)
 - optimized encoding of packed fixed-length primitives (in particular, arrays)
 
-(see also: [protobuf-net: large data, and the future](http://blog.marcgravell.com/2017/05/protobuf-net-large-data-and-future.html))
+(see also: [protobuf-net: large data, and the future](https://blog.marcgravell.com/2017/05/protobuf-net-large-data-and-future.html))
 
 ## v2.1.0
 

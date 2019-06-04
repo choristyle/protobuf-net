@@ -84,7 +84,7 @@ namespace Examples
             var arr = new Foo[0];
             var model = TypeModel.Create();
             Foo[] foo = (Foo[])model.DeepClone(arr);
-            Assert.Equal(0, foo.Length);
+            Assert.Empty(foo);
         }
         [Fact]
         public void DeserializeBusyArray()
@@ -111,9 +111,27 @@ namespace Examples
             Assert.True(clone.Overwrite.SequenceEqual(new[] { 9, 10 }), "Overwrite, CompileInPlace");
             Assert.True(clone.Append.SequenceEqual(new[] { 1, 2, 3, 7, 8 }), "Append, CompileInPlace");
 
+            clone = (WithAndWithoutOverwrite)model.Compile("TestOverwriteVersusAppendTypeModel", "TestOverwriteVersusAppend.dll").DeepClone(orig);
+            Assert.True(clone.Overwrite.SequenceEqual(new[] { 9, 10 }), "Overwrite, CompileToFile");
+            Assert.True(clone.Append.SequenceEqual(new[] { 1, 2, 3, 7, 8 }), "Append, CompileToFile");
+
             clone = (WithAndWithoutOverwrite)(model.Compile()).DeepClone(orig);
             Assert.True(clone.Overwrite.SequenceEqual(new[] { 9, 10 }), "Overwrite, Compile");
             Assert.True(clone.Append.SequenceEqual(new[] { 1, 2, 3, 7, 8 }), "Append, Compile");
+        }
+
+        [Fact]
+        public void TestDirectSkipConstructor()
+        {
+            var obj = new SkipCtorType();
+            Assert.Equal(42, obj.Value);
+
+            obj = (SkipCtorType)BclHelpers.GetUninitializedObject(typeof(SkipCtorType));
+            Assert.Equal(0, obj.Value);
+        }
+        public class SkipCtorType
+        {
+            public int Value { get; set; } = 42;
         }
 
         [Fact]
@@ -205,7 +223,7 @@ namespace Examples
             VerifyNodeTree(node);
         }
 
-        // [Fact] known variation...
+        [Fact(Skip = "known variation")]
         public void TestEmptyArray()
         {
             Node node = new Node

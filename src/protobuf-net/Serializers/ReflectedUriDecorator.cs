@@ -1,6 +1,9 @@
 ﻿#if !NO_RUNTIME
 #if PORTABLE
 using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 
 namespace ProtoBuf.Serializers
@@ -17,18 +20,36 @@ namespace ProtoBuf.Serializers
 
         private readonly ConstructorInfo typeConstructor;
 
-        public ReflectedUriDecorator(Type type, ProtoBuf.Meta.TypeModel model, IProtoSerializer tail) : base(tail)
+        public ReflectedUriDecorator(Type type, IProtoSerializer tail) : base(tail)
         {
             expectedType = type;
 
-            absoluteUriProperty = expectedType.GetProperty("AbsoluteUri");
+#if PROFILE259
+			absoluteUriProperty = expectedType.GetRuntimeProperty("AbsoluteUri");
+	        IEnumerable<ConstructorInfo> constructors = expectedType.GetTypeInfo().DeclaredConstructors;
+	        typeConstructor = null;
+			foreach(ConstructorInfo constructor in constructors)
+			{
+				ParameterInfo[] parameters = constructor.GetParameters();
+				ParameterInfo parameterFirst = parameters.FirstOrDefault();
+				Type stringType = typeof(string);
+				if (parameterFirst != null && 
+					parameterFirst.ParameterType == stringType)
+				{
+					typeConstructor = constructor;
+					break;
+				}
+	        }
+#else
+			absoluteUriProperty = expectedType.GetProperty("AbsoluteUri");
             typeConstructor = expectedType.GetConstructor(new Type[] { typeof(string) });
-        }
-        public override Type ExpectedType { get { return expectedType; } }
+#endif
+		}
+		public override Type ExpectedType { get { return expectedType; } }
         public override bool RequiresOldValue { get { return false; } }
         public override bool ReturnsValue { get { return true; } }
         
-        public override void Write(object value, ProtoWriter dest)
+        public override void Write(ProtoWriter dest, ref ProtoWriter.State state, object value)
         {
             Tail.Write(absoluteUriProperty.GetValue(value, null), dest);
         }
@@ -58,11 +79,11 @@ namespace ProtoBuf.Serializers
             ctx.LoadNullRef();
             ctx.Branch(@end, true);
             ctx.MarkLabel(@nonEmpty);
-            ctx.EmitCtor(expectedType, ctx.MapType(typeof(string)));
+            ctx.EmitCtor(expectedType, typeof(string));
             ctx.MarkLabel(@end);
             
         }
-#endif 
+#endif
     }
 }
 #endif
